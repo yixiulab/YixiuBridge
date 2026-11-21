@@ -67,7 +67,11 @@ function matchExtension(extensions, want) {
   return null;
 }
 
-export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAULT_DATA_DIR, repoRoot = null } = {}) {
+export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAULT_DATA_DIR, repoRoot = null, askTimeoutSlackS = 60 } = {}) {
+  // askTimeoutSlackS: seconds added to timeout_s for the bridge-side call
+  // timer (default 60 — the router answers "pending" at timeout_s, so the
+  // bridge timer only fires when that answer is lost). Tests pass 0 so the
+  // timeout path runs in ~1s instead of ~61s; production is unchanged.
   const trust = new TrustRegistry(dataDir);
   await trust.load();
 
@@ -125,26 +129,45 @@ export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAU
     controller.busy = true;
     const id = 'call_' + (nextId++) + '_' + Date.now().toString(36);
     const timeoutMs = tool === 'ask_gemini'
-      ? Math.min(((params.timeout_s || 180) + 60) * 1000, C.TOOL_CALL_TIMEOUT_MS)
+      ? Math.min(((params.timeout_s || 180) + askTimeoutSlackS) * 1000, C.TOOL_CALL_TIMEOUT_MS)
       : 60000;
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        releaseLock(clientId);
-        resolve({
-          ok: false,
-          error: tool + ' timed out after ' + Math.round(timeoutMs / 1000) + 's — the task may still be running in the browser; poll get_answer if it returned a task_id.',
-        });
-      }, timeoutMs);
-      pending.set(id, {
+      let timer;
+      // taskId is filled in by the /task-update handler: the router
+      // registers the task id as soon as the ask starts, so a bridge-side
+      // timeout can hand the caller a task_id to poll (v0.3.4, task -007:
+      // the old timeout error carried no id and the answer was lost even
+      // though Gemini had answered in the tab).
+      const entry = {
+        tool,
+        taskId: null,
         resolve: (frame) => {
           clearTimeout(timer);
           releaseLock(clientId);
           resolve(frame);
         },
-        tool,
-      });
+      };
+      timer = setTimeout(() => {
+        pending.delete(id);
+        releaseLock(clientId);
+        if (entry.taskId) {
+          resolve({
+            ok: true,
+            result: {
+              status: 'pending',
+              task_id: entry.taskId,
+              note: tool + ' timed out after ' + Math.round(timeoutMs / 1000) + 's — the task is still running in the browser; poll get_answer with this task_id.',
+            },
+          });
+        } else {
+          resolve({
+            ok: false,
+            error: tool + ' timed out after ' + Math.round(timeoutMs / 1000) + 's — the task may still be running in the browser; poll get_answer if it returned a task_id.',
+          });
+        }
+      }, timeoutMs);
+      pending.set(id, entry);
       pushToExtension(ext, { type: 'tool_call', id, tool, params, controller: clientId });
     });
   }
@@ -190,7 +213,19 @@ export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAU
       // ---- Long-task completion notice from the extension ----
       if (req.method === 'POST' && url.pathname === '/task-update') {
         const frame = await readBody(req);
-        if (frame.taskId && frame.task) tasks.set(frame.taskId, frame.task);
+        if (frame.taskId && frame.task) {
+          tasks.set(frame.taskId, frame.task);
+          // The router registers the task id as soon as the ask starts
+          // (status 'running') and again when it finishes. Attach the id
+          // to the in-flight ask_gemini call, if any — the controller lock
+          // guarantees at most one browser task runs at a time, so the
+          // pending ask call is the one this task belongs to. Without
+          // this, a bridge-side timeout has no id to hand the caller and
+          // the answer is unrecoverable (v0.3.4, task -007).
+          for (const call of pending.values()) {
+            if (call.tool === 'ask_gemini' && !call.taskId) { call.taskId = frame.taskId; break; }
+          }
+        }
         sendJson(res, 200, { ok: true });
         return;
       }
