@@ -13,7 +13,8 @@
 # 存 config.json 当平局参考，每次都重新扫描、以新结果为准。定位不到就
 # 不打开任何浏览器，只更新代码和服务。绝不杀 chrome.exe、不关任何窗口。
 param(
-[string]$InstallDir = ""
+[string]$InstallDir = "",
+[switch]$SkipUpdate
 )
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; chcp 65001 > $null} catch {}
@@ -22,7 +23,13 @@ $EXTENSION_ID = 'alcjfcjfkfhfacgofhgoenljfenbcgcel'
 $BRIDGE_PORT = 8765
 $REPO = 'yixiulab/YixiuBridge'
 
-function Step($n, $text) { Write-Host "$text"}
+# 步骤跟踪：catch 里按实情汇报哪一步失败、桥和 runner 各自起了没有，
+# 不再笼统说“桥和 runner 可能还没起来”。
+$currentStep = 0
+$bridgeStarted = $false
+$runnerStarted = $false
+
+function Step($n, $text) { $script:currentStep = $n; Write-Host "$text"}
 function Info($text) { Write-Host " $text"}
 function Warn($text) { Write-Host " 注意：$text"}
 
@@ -59,8 +66,9 @@ if (-not $token) {
 Info '没有找到令牌，跳过更新，只启动服务。想自动更新请先运行一次 node bin/yixiubridge.mjs github-token 粘贴令牌。'
 }
 
-# 3. 下载最新版并覆盖
-if ($token) {
+# 3. 下载最新版并覆盖（-SkipUpdate 时跳过：新版脚本接管后不需要重复下载）。
+$downloaded = $false
+if ($token -and -not $SkipUpdate) {
 Step 3 '下载最新版...'
 $zipPath = Join-Path $env:TEMP 'YixiuBridge-latest.zip'
 $extractDir = Join-Path $env:TEMP 'YixiuBridge-update'
@@ -83,6 +91,26 @@ Get-ChildItem -Path $srcDir -Force | Copy-Item -Destination $InstallDir -Recurse
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 Info '更新完成。'
+}
+}
+
+# 自我更新交接：刚下载的新版里如果启动脚本变了，改用新版脚本继续执行。
+# （本脚本是 .bat 拷到 %TEMP% 的旧副本；不交接的话一次双击会跑完旧逻辑。）
+# 新版脚本用 -SkipUpdate 接管，只跑打包、重启桥、启动 runner、开 Chrome，
+# 不重复下载。哈希相同就不交接，直接继续。
+if ($downloaded) {
+$newScript = Join-Path $InstallDir 'scripts\update-and-start.ps1'
+$runningScript = $MyInvocation.MyCommand.Path
+try {
+$hOld = (Get-FileHash $runningScript -Algorithm SHA256 -ErrorAction Stop).Hash
+$hNew = (Get-FileHash $newScript -Algorithm SHA256 -ErrorAction Stop).Hash
+if ($hOld -ne $hNew) {
+Info '检测到新版启动脚本，改用新版继续执行...'
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$newScript" -InstallDir "$InstallDir" -SkipUpdate
+exit $LASTEXITCODE
+}
+} catch {
+Warn "新版脚本交接失败（$($_.Exception.Message)），继续用当前版本执行。"
 }
 }
 
@@ -112,6 +140,7 @@ if (-not $skipBridge) { Start-Sleep -Seconds 1}
 }
 if (-not $skipBridge) {
 Start-Process -FilePath 'node' -ArgumentList 'bin/yixiubridge.mjs','bridge' -WorkingDirectory $InstallDir -WindowStyle Minimized
+$bridgeStarted = $true
 Start-Sleep -Seconds 2
 try {
 $st = Invoke-RestMethod -Uri "http://127.0.0.1:$BRIDGE_PORT/status" -TimeoutSec 5
@@ -127,15 +156,17 @@ $lockPath = Join-Path $env:USERPROFILE '.yixiubridge\muse-runner.lock'
 $runnerRunning = $false
 if (Test-Path $lockPath) {
 $lockPid = (Get-Content $lockPath -Raw -ErrorAction SilentlyContinue).Trim()
-if ($lockPid -match '^\d+$') {
+if ($lockPid -and [regex]::IsMatch($lockPid, '^\d+$')) {
 $p = Get-Process -Id ([int]$lockPid) -ErrorAction SilentlyContinue
 if ($p) { $runnerRunning = $true}
 }
 }
 if ($runnerRunning) {
 Info 'runner 已在运行，跳过。'
+$runnerStarted = $true
 } else {
 Start-Process -FilePath 'node' -ArgumentList 'bin/yixiubridge.mjs','runner' -WorkingDirectory $InstallDir -WindowStyle Minimized
+$runnerStarted = $true
 Info 'runner 已启动（最小化窗口）。'
 }
 
@@ -144,6 +175,12 @@ Info 'runner 已启动（最小化窗口）。'
 # 扫描各身份的 Secure Preferences 定位身份目录名，再用
 # --profile-directory 只开那一个身份；已在运行就不重复开。
 # 定位不到就不开任何浏览器，只完成上面的更新和启动。
+# 血的教训（v0.3.1 的 bug）：绝不能用 $matches 存扫描结果！$matches
+# 是 PowerShell 自动变量，-match / -notmatch 会把它改写成匹配记录
+# （hashtable），后面选出来的就是个没有 ProfileDir/Exe 的空对象
+# （身份名为空、chrome.exe 为 Null）。所以本节一律用 [regex]::IsMatch()
+# 和 .Contains()，绝不用 -match / -notmatch。
+# 选身份的规则另见 kernel/shared/chrome-discovery.js（可测试的同款实现）。
 Step 7 '定位装了插件的 Chrome 身份...'
 # 硬要求：(1) 绝不写死路径——每次动态发现 chrome.exe（注册表 App Paths、
 # Get-Command、标准路径：正式版/Beta/Canary 都查），再按扩展 ID 扫各身份
@@ -157,12 +194,14 @@ Step 7 '定位装了插件的 Chrome 身份...'
 
 # 按 chrome.exe 路径推断它用的 User Data 目录（正式版/Beta/Canary）。
 function Get-UserDataDirForChrome($exePath) {
-  if ($exePath -match 'Chrome Beta') { return (Join-Path $env:LOCALAPPDATA 'Google\Chrome Beta\User Data') }
-  if ($exePath -match 'Chrome SxS') { return (Join-Path $env:LOCALAPPDATA 'Google\Chrome SxS\User Data') }
+  if ([regex]::IsMatch($exePath, 'Chrome Beta')) { return (Join-Path $env:LOCALAPPDATA 'Google\Chrome Beta\User Data') }
+  if ([regex]::IsMatch($exePath, 'Chrome SxS')) { return (Join-Path $env:LOCALAPPDATA 'Google\Chrome SxS\User Data') }
   return (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data')
 }
 
 # 收集 chrome.exe 候选路径：注册表 → Get-Command → 各通道标准路径。
+# 下面这些是 Chrome 各通道的默认安装位置（系统默认值，不是用户写死的
+# 个人路径）；身份目录仍每次动态发现，绝不写死。
 $exeCandidates = @()
 foreach ($regPath in @(
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe',
@@ -198,38 +237,79 @@ foreach ($exe in $exeCandidates) {
   $installs += @{ Exe = $exe; UserData = $ud }
 }
 
-# 扫描各身份的 Secure Preferences，找含有扩展 ID 的身份。
-$matches = @()
+# 读一个文本文件：Chrome 运行时可能正写着它，先正常读，失败再用共享读
+# 方式重试；都失败返回 $null（调用方记为“读不到”并告警，不静默跳过）。
+function Read-TextFileShared($path) {
+  try { return (Get-Content $path -Raw -ErrorAction Stop) } catch { }
+  $fs = $null
+  $sr = $null
+  try {
+    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+    return $sr.ReadToEnd()
+  } catch { return $null } finally {
+    if ($sr) { $sr.Dispose() } elseif ($fs) { $fs.Dispose() }
+  }
+}
+
+# 扫描各身份，找含有扩展 ID 的身份。证据有两条（任一成立即算匹配）：
+# (1) Secure Preferences 文本里含有扩展 ID；(2) 该身份下有
+# "Local Extension Settings\<扩展 ID>" 目录（扩展用过本地存储就会有）。
+# 读不到文件的身份记下来并告警，绝不静默跳过。
+# 变量名绝不能叫 $matches（见上面血的教训）。
+$foundProfiles = @()
+$scannedProfiles = 0
+$unreadableProfiles = @()
 foreach ($inst in $installs) {
   if (-not (Test-Path $inst.UserData)) { continue }
   $profileDirs = Get-ChildItem -Path $inst.UserData -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -eq 'Default' -or $_.Name -match '^Profile \d+$' }
+    Where-Object { $_.Name -eq 'Default' -or [regex]::IsMatch($_.Name, '^Profile \d+$') }
   foreach ($d in $profileDirs) {
-    $prefs = Join-Path $d.FullName 'Secure Preferences'
-    if (-not (Test-Path $prefs)) { continue }
-    try {
-      $text = Get-Content $prefs -Raw -ErrorAction Stop
-    } catch { continue }
-    if ($text -notmatch [regex]::Escape($EXTENSION_ID)) { continue }
+    $scannedProfiles++
+    $prefsPath = Join-Path $d.FullName 'Secure Preferences'
+    $prefsText = $null
+    $prefsReadable = $false
+    if (Test-Path $prefsPath) {
+      $prefsText = Read-TextFileShared $prefsPath
+      if ($null -ne $prefsText) { $prefsReadable = $true }
+    }
+    $lesDir = Join-Path $d.FullName "Local Extension Settings\$EXTENSION_ID"
+    $lesExists = Test-Path $lesDir
+    if (-not $prefsReadable -and -not $lesExists) {
+      $unreadableProfiles += "$($d.Name)（$($inst.UserData)）"
+      continue
+    }
+    $hasId = $false
+    $evidence = @()
+    if ($prefsReadable -and $prefsText.Contains($EXTENSION_ID)) { $hasId = $true; $evidence += 'Secure Preferences' }
+    if ($lesExists) { $hasId = $true; $evidence += 'Local Extension Settings' }
+    if (-not $hasId) { continue }
     $prefFile = Join-Path $d.FullName 'Preferences'
     $mtime = $null
     if (Test-Path $prefFile) { $mtime = (Get-Item $prefFile).LastWriteTime }
-    elseif (Test-Path $prefs) { $mtime = (Get-Item $prefs).LastWriteTime }
-    $matches += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime }
+    elseif (Test-Path $prefsPath) { $mtime = (Get-Item $prefsPath).LastWriteTime }
+    $foundProfiles += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime; Evidence = ($evidence -join '+') }
   }
+}
+Info "共扫描 $scannedProfiles 个 Chrome 身份，其中 $($foundProfiles.Count) 个装了 YixiuBridge。"
+if ($unreadableProfiles.Count -gt 0) {
+  Warn '以下身份的 Secure Preferences 读不到（可能正被 Chrome 占用），本次没用它们做判断：'
+  foreach ($u in $unreadableProfiles) { Info "  $u" }
 }
 
 # 选择：(a) 优先选已有 chrome.exe 进程在运行的那个匹配身份；
 # (b) 都没在运行就选 Preferences 最近修改的那个；
 # (c) 修改时间相同（或都没有）时，参考上次选中的身份。
+# 注意：只在已确认装了插件的身份里选；一个都没找到就什么都不开，
+# 绝不退而求其次去开一个没装插件的身份。
 $chosen = $null
 $chosenRunning = $false
 $why = ''
-if ($matches.Count -gt 0) {
+if ($foundProfiles.Count -gt 0) {
   $running = @()
   try {
     $chromeProcs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction Stop
-    foreach ($m in $matches) {
+    foreach ($m in $foundProfiles) {
       $wantFlag = '--profile-directory="' + $m.ProfileDir + '"'
       foreach ($pr in $chromeProcs) {
         if ($pr.CommandLine -and $pr.CommandLine.Contains($wantFlag)) { $running += $m; break }
@@ -242,7 +322,7 @@ if ($matches.Count -gt 0) {
     $why = '该身份的 Chrome 已在运行'
     if ($running.Count -gt 1) { $why += '（多个匹配身份都在运行，取第一个）' }
   } else {
-    $sorted = $matches | Sort-Object { if ($_.Modified) { $_.Modified } else { [datetime]::MinValue } } -Descending
+    $sorted = $foundProfiles | Sort-Object { if ($_.Modified) { $_.Modified } else { [datetime]::MinValue } } -Descending
     $chosen = $sorted[0]
     $why = '该身份的 Preferences 最近修改过'
     if ($sorted.Count -gt 1 -and $sorted[0].Modified -eq $sorted[1].Modified) {
@@ -256,8 +336,10 @@ if ($matches.Count -gt 0) {
   }
 }
 
+$chromeOpened = $false
+$chromeSkipped = ''
 if ($chosen) {
-  Info "选中 Chrome 身份：$($chosen.ProfileDir)（$why）"
+  Info "选中 Chrome 身份：$($chosen.ProfileDir)（$why；证据：$($chosen.Evidence)）"
   # 把本次选择记到 config.json 里当下次平局的参考；写失败也不影响主流程。
   try {
     $cfgObj = $null
@@ -266,23 +348,37 @@ if ($chosen) {
     $cfgObj | Add-Member -NotePropertyName 'last_chrome_profile' -NotePropertyValue $chosen.ProfileDir -Force
     $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
   } catch { }
-  if ($chosenRunning) {
+  if (-not $chosen.Exe -or -not (Test-Path $chosen.Exe)) {
+    Warn '选中的身份没有可用的 chrome.exe 路径（内部错误），本次不打开浏览器。桥和 runner 已正常启动。'
+    $chromeSkipped = '选中的身份缺少 chrome.exe 路径'
+  } elseif ($chosenRunning) {
     Info "Chrome（$($chosen.ProfileDir)）已在运行，不再重复打开。"
+    $chromeOpened = $true
   } else {
     Start-Process -FilePath $chosen.Exe -ArgumentList "--profile-directory=`"$($chosen.ProfileDir)`"", 'https://gemini.google.com'
     Info "已用身份 $($chosen.ProfileDir) 打开 Chrome 到 Gemini。"
+    $chromeOpened = $true
   }
 } else {
-  Warn '没能定位到装了 YixiuBridge 的 Chrome 身份（路径不同、Beta/Canary 版、或 Secure Preferences 解析失败），本次不打开任何浏览器。'
+  Warn '没能定位到装了 YixiuBridge 的 Chrome 身份（没有哪个身份的 Secure Preferences 里含有该扩展，或相关文件读不到），本次不打开任何浏览器。'
   Write-Host ' 请你自己打开平时用 Gemini 的那个 Chrome 就好：插件会靠定时自检自动更新到最新版，任务会等插件连上再做，不会丢。'
+  $chromeSkipped = '没能定位到装了插件的身份'
 }
 
 Write-Host ''
+if ($chromeOpened) {
+Write-Host '全部完成：桥和 runner 已启动，Chrome 已打开到 Gemini。插件会在一分钟内自动更新到最新版（不需要再手动重载）。'
+} elseif ($chromeSkipped) {
+Write-Host "已完成：桥和 runner 已启动；Chrome 没打开（$chromeSkipped）。请自己打开平时用 Gemini 的那个 Chrome，插件会自动更新。"
+} else {
 Write-Host '全部完成：桥和 runner 已启动。插件会在一分钟内自动更新到最新版（不需要再手动重载）。'
+}
 } catch {
 Write-Host ''
-Write-Host "出错：$($_.Exception.Message)"
-Write-Host '桥和 runner 可能还没起来。请看上面的报错，处理好后再双击一次 一键启动.bat。'
+Write-Host "出错（第 $currentStep 步）：$($_.Exception.Message)"
+if ($bridgeStarted) { Write-Host '桥已经启动成功。' } else { Write-Host '桥还没启动。' }
+if ($runnerStarted) { Write-Host 'runner 已经启动成功。' } else { Write-Host 'runner 还没启动。' }
+Write-Host '请看上面的报错，处理好后再双击一次 一键启动.bat。'
 }
 
 Write-Host ''
