@@ -26,9 +26,10 @@
 // Run: node bin/yixiubridge.mjs runner [--interval <seconds>]
 //      node host/muse-runner.mjs [--interval <seconds>]
 // Needs: bridge running, extension loaded, github_token saved.
-import { appendFile, chmod, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import C from '../kernel/shared/constants.js';
 
@@ -175,6 +176,189 @@ function logVersionMismatch(log, bridgeVersion, adapterVersion) {
   if (!bridgeVersion || !adapterVersion || bridgeVersion === adapterVersion) return;
   log('⚠ 版本不一致: bridge v' + bridgeVersion + '，但 Gemini 适配器 v' + adapterVersion
     + ' — 标签页里的适配器是旧的。请双击 一键启动.bat 更新（或关闭 Gemini 标签页重开一个）后再试。');
+}
+
+// ---------- auto-open Chrome when no extension is connected (v0.3.7) ----------
+// Background: 2026-11-21, the 0.3.6 update. The user double-clicked
+// 一键启动.bat at 19:10; the bridge restarted, but from 19:11 to 19:23
+// the runner logged "bridge is up but no Chrome extension is connected"
+// once a minute and did nothing about it. The loop only closed at 19:27
+// when the user opened Profile 21's Chrome by hand and the plugin
+// reconnected (-010 then answered in 43s). Whether Chrome was closed or
+// the service worker never woke, no component on the PC tried to recover.
+// The runner is the only piece that is always running, so it now opens
+// Chrome itself — but ONLY when a task is actually waiting and no
+// extension is connected, so it never pops a browser window up for
+// nothing. The profile rules are the testable half of
+// kernel/shared/chrome-discovery.js (same confirmed-first rule: the
+// extension ID must be an own key of extensions.settings, or the profile
+// must have a Local Extension Settings/<id> directory — a bare substring
+// hit, e.g. stale protection MACs, is unconfirmed and ranks below any
+// confirmed profile). The PowerShell updater keeps the fuller rule set
+// (running-process first, loads-our-copy tiebreak); the runner uses the
+// cached last_chrome_profile + recency, which on the real machine picks
+// Profile 21 over Profile 18's stale MACs.
+export const EXTENSION_ID = 'alcjfcjfkhfacgofhgoenljfenbcgcel';
+export const CHROME_OPEN_MIN_INTERVAL_MS = 180000; // 3 min between attempts
+export const CHROME_OPEN_MAX_ATTEMPTS_PER_TASK = 3; // then stop trying for that task
+export const GEMINI_URL = 'https://gemini.google.com';
+
+function isProfileDirName(name) {
+  if (name === 'Default') return true;
+  return /^Profile \d+$/.test(name);
+}
+
+function prefsSettingsObject(text) {
+  if (typeof text !== 'string') return null;
+  try {
+    const prefs = JSON.parse(text);
+    const settings = prefs && prefs.extensions && prefs.extensions.settings;
+    if (settings && typeof settings === 'object') return settings;
+  } catch (e) { /* unparsable: no settings object */ }
+  return null;
+}
+
+// Scan one Chrome User Data directory for profiles with the extension.
+// Returns the best match { profileDir, confirmed, loadedPath, evidence }
+// or null when no profile shows any trace of the extension.
+// preferredProfileDir (config.json's last_chrome_profile) wins when it is
+// a confirmed match; otherwise the most recently modified confirmed
+// profile wins, then the most recently modified unconfirmed one.
+// Never throws for unreadable files — a profile whose files cannot be
+// read is skipped, not treated as a match.
+export async function findExtensionProfile(userDataDir, {
+  preferredProfileDir = null,
+  readdir: readdirImpl = readdir,
+  readFile: readFileImpl = readFile,
+  stat: statImpl = stat,
+} = {}) {
+  let entries;
+  try {
+    entries = await readdirImpl(userDataDir, { withFileTypes: true });
+  } catch (e) {
+    return null;
+  }
+  const matches = [];
+  for (const entry of entries) {
+    const isDir = typeof entry.isDirectory === 'function' ? entry.isDirectory() : !!entry.isDirectory;
+    if (!isDir || !isProfileDirName(entry.name)) continue;
+    const dir = join(userDataDir, entry.name);
+    async function readPrefs(name) {
+      try { return await readFileImpl(join(dir, name), 'utf8'); } catch (e) { return null; }
+    }
+    const secureText = await readPrefs('Secure Preferences');
+    const prefsText = await readPrefs('Preferences');
+    const secureSettings = prefsSettingsObject(secureText);
+    const prefsSettings = prefsSettingsObject(prefsText);
+    const hasSettingsKey = (s) => !!s && Object.prototype.hasOwnProperty.call(s, EXTENSION_ID);
+    let lesExists = false;
+    try { await statImpl(join(dir, 'Local Extension Settings', EXTENSION_ID)); lesExists = true; } catch (e) { /* no such directory */ }
+    const confirmed = hasSettingsKey(secureSettings) || hasSettingsKey(prefsSettings) || lesExists;
+    const unconfirmed = !confirmed
+      && ((typeof secureText === 'string' && secureText.includes(EXTENSION_ID))
+        || (typeof prefsText === 'string' && prefsText.includes(EXTENSION_ID)));
+    if (!confirmed && !unconfirmed) continue;
+    let loadedPath = null;
+    const entryWithPath = (hasSettingsKey(secureSettings) && secureSettings[EXTENSION_ID])
+      || (hasSettingsKey(prefsSettings) && prefsSettings[EXTENSION_ID]);
+    if (entryWithPath && typeof entryWithPath.path === 'string') loadedPath = entryWithPath.path;
+    let modifiedMs = null;
+    try { modifiedMs = (await statImpl(join(dir, 'Secure Preferences'))).mtimeMs; } catch (e) { /* ignore */ }
+    if (modifiedMs === null) {
+      try { modifiedMs = (await statImpl(join(dir, 'Preferences'))).mtimeMs; } catch (e) { /* ignore */ }
+    }
+    matches.push({
+      profileDir: entry.name,
+      confirmed,
+      loadedPath,
+      evidence: confirmed ? 'Secure Preferences' : 'Secure Preferences (unconfirmed)',
+      modifiedMs: modifiedMs === null ? -Infinity : modifiedMs,
+    });
+  }
+  if (!matches.length) return null;
+  if (preferredProfileDir) {
+    const hit = matches.find((m) => m.profileDir === preferredProfileDir && m.confirmed);
+    if (hit) return hit;
+  }
+  const confirmedPool = matches.filter((m) => m.confirmed);
+  const pool = confirmedPool.length ? confirmedPool : matches;
+  pool.sort((a, b) => b.modifiedMs - a.modifiedMs);
+  return pool[0];
+}
+
+// Find chrome.exe in the standard install locations. Returns the first
+// path that exists, or null. (Same locations the PowerShell updater
+// checks; the registry App Paths lookup stays in the updater.)
+export async function findChromeExe({ env = process.env, stat: statImpl = stat } = {}) {
+  const bases = [env.ProgramFiles, env['ProgramFiles(x86)'], env.LOCALAPPDATA].filter(Boolean);
+  const seen = new Set();
+  for (const base of bases) {
+    const exe = join(base, 'Google', 'Chrome', 'Application', 'chrome.exe');
+    if (seen.has(exe.toLowerCase())) continue;
+    seen.add(exe.toLowerCase());
+    try { await statImpl(exe); return exe; } catch (e) { /* not here */ }
+  }
+  return null;
+}
+
+// The auto-opener: stateful (throttle + per-task attempt cap) so a stuck
+// machine never spams Chrome windows. All platform/filesystem/process
+// access is injectable so tests can run on Linux; on a real PC the
+// defaults are used and the opener only acts on Windows.
+export function createChromeOpener({
+  dataDir = DEFAULT_DATA_DIR,
+  platform = process.platform,
+  env = process.env,
+  spawnImpl = spawn,
+  findProfileFn = findExtensionProfile,
+  findExeFn = findChromeExe,
+  now = () => Date.now(),
+} = {}) {
+  let lastAttemptAt = 0;
+  const attemptsByTask = new Map();
+  return {
+    async ensureConnected({ taskId, log = () => {} } = {}) {
+      if (platform !== 'win32') return { opened: false, reason: 'not-windows' };
+      const nowMs = now();
+      if (nowMs - lastAttemptAt < CHROME_OPEN_MIN_INTERVAL_MS) {
+        return { opened: false, reason: 'throttled', nextRetryInMs: CHROME_OPEN_MIN_INTERVAL_MS - (nowMs - lastAttemptAt) };
+      }
+      const attempts = attemptsByTask.get(taskId) || 0;
+      if (attempts >= CHROME_OPEN_MAX_ATTEMPTS_PER_TASK) {
+        return { opened: false, reason: 'max-attempts' };
+      }
+      lastAttemptAt = nowMs;
+      attemptsByTask.set(taskId, attempts + 1);
+      const cfg = await loadConfig(dataDir);
+      const localAppData = env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
+      const userDataDir = join(localAppData, 'Google', 'Chrome', 'User Data');
+      let profile;
+      try {
+        profile = await findProfileFn(userDataDir, { preferredProfileDir: cfg.last_chrome_profile || null });
+      } catch (e) {
+        log('自动打开 Chrome 失败：找插件身份时出错（' + (e && e.message ? e.message : String(e)) + '）— 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
+        return { opened: false, reason: 'profile-scan-failed' };
+      }
+      if (!profile) {
+        log('没有插件连着，但没找到装了 YixiuBridge 的 Chrome 身份 — 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
+        return { opened: false, reason: 'no-profile' };
+      }
+      const exe = await findExeFn({ env });
+      if (!exe) {
+        log('没有插件连着，找到了身份 ' + profile.profileDir + ' 但没找到 chrome.exe — 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
+        return { opened: false, reason: 'no-chrome-exe' };
+      }
+      try {
+        const child = spawnImpl(exe, ['--profile-directory=' + profile.profileDir, GEMINI_URL], { detached: true, stdio: 'ignore' });
+        if (child && typeof child.unref === 'function') child.unref();
+      } catch (e) {
+        log('自动打开 Chrome 失败（' + (e && e.message ? e.message : String(e)) + '）— 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
+        return { opened: false, reason: 'spawn-failed' };
+      }
+      log('没有插件连着，正在帮你打开 Chrome（' + profile.profileDir + '）到 Gemini — 插件连上后任务 ' + taskId + ' 会自动接着做，不用你动手');
+      return { opened: true, profileDir: profile.profileDir, confirmed: profile.confirmed };
+    },
+  };
 }
 
 // ---------- GitHub API client (token only from local config) ----------
@@ -396,7 +580,7 @@ async function appendLog(github, entry, log) {
 // Process ONE pending task (the oldest). Returns a status object; never
 // throws for a single bad task — only GitHub/bridge outages propagate
 // (the run loop turns rate limits into backoff).
-export async function processOneTask({ github, bridge, log = () => {} } = {}) {
+export async function processOneTask({ github, bridge, log = () => {}, chromeOpener = null } = {}) {
   const list = await github.listPending();
   if (!list.length) return { status: 'empty' };
 
@@ -457,6 +641,20 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
   }
   if (st.extensions === 0) {
     log('bridge is up but no Chrome extension is connected — leaving task ' + task.id + ' pending');
+    // v0.3.7: don't just wait — open Chrome ourselves so the plugin can
+    // reconnect and the task can proceed (the 2026-11-21 0.3.6 update
+    // sat like this for 12 minutes until the user opened Chrome by
+    // hand). Only when a task is actually waiting; the opener throttles
+    // itself and gives up after 3 tries for one task. A failure to open
+    // Chrome never fails the task — it stays pending either way.
+    if (chromeOpener) {
+      try {
+        const opened = await chromeOpener.ensureConnected({ taskId: task.id, log });
+        return { status: 'no-extension', id: task.id, chromeOpened: !!opened.opened, chromeProfile: opened.profileDir || null, chromeReason: opened.reason || null };
+      } catch (e) {
+        log('自动打开 Chrome 失败（' + (e && e.message ? e.message : String(e)) + '）— 任务继续等着');
+      }
+    }
     return { status: 'no-extension', id: task.id };
   }
 
@@ -624,6 +822,9 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
     : (cfg.runner_interval_s || DEFAULT_INTERVAL_S);
   const github = createGitHubClient({ token: cfg.github_token, fetchImpl });
   const bridge = createBridgeCaller({ bridgeUrl, fetchImpl });
+  // v0.3.7: the runner opens Chrome itself when a task is waiting and no
+  // extension is connected (see createChromeOpener).
+  const chromeOpener = createChromeOpener({ dataDir });
   const lockPath = await acquireLock(dataDir, log);
   // Heartbeat (v0.3.4): proves this runner is alive. A later runner that
   // finds a stale lock uses it to tell a live runner from a dead one.
@@ -647,7 +848,7 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
       continue;
     }
     try {
-      const res = await processOneTask({ github, bridge, log });
+      const res = await processOneTask({ github, bridge, log, chromeOpener });
       if (res.status === 'empty') log('poll: no pending tasks');
       else if (res.status === 'done' || res.status === 'failed' || res.status === 'already-resolved') {
         log('task ' + res.id + ': ' + res.status
