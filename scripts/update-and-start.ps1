@@ -91,10 +91,11 @@ Info '没有找到令牌，跳过更新，只启动服务。想自动更新请�
 # 更新交接照常跑（新版脚本接管）；$zipDownloaded 只表示 ZIP 真下载了。
 $downloaded = $false
 $zipDownloaded = $false
+$script:currentStep = 3
 if ($token -and -not $SkipUpdate) {
 $onlineUpdater = Join-Path $InstallDir 'host\online-updater.mjs'
 $onlineCli = Join-Path $InstallDir 'scripts\online-update-cli.mjs'
-if (Test-Path $onlineUpdater -and Test-Path $onlineCli) {
+if ((Test-Path $onlineUpdater) -and (Test-Path $onlineCli)) {
 Step 3 '在线更新（只拉改动文件）...'
 try {
 & node "$onlineCli" --install-dir "$InstallDir"
