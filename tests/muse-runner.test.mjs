@@ -258,6 +258,38 @@ test('browser busy leaves the task pending for the next cycle', async () => {
   assert.equal(gh.files.has('tasks/failed/t1.error.json'), false);
 });
 
+test('idempotency guard: a pending task whose done file already exists is NOT asked again (v0.3.3)', async () => {
+  // The runner writes done FIRST, then deletes pending. If it is stopped
+  // in between, the next poll sees the same pending task — without this
+  // guard it would ask Gemini the same question a second time.
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+    'tasks/done/t1.answer.json': { content: JSON.stringify({ id: 't1', answer: 'already answered', model: 'gemini-web' }), sha: 's2' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge();
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'already-resolved');
+  assert.equal(res.id, 't1');
+  assert.equal(bridge.calls.filter((c) => c.op === 'ask').length, 0, 'the question must not be asked a second time');
+  assert.equal(gh.files.has('tasks/pending/t1.json'), false, 'the leftover pending file is removed');
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').answer, 'already answered', 'the existing answer file is untouched');
+});
+
+test('idempotency guard: a pending task whose failed file already exists is NOT asked again — even when the bridge is down', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+    'tasks/failed/t1.error.json': { content: JSON.stringify({ id: 't1', error: 'earlier failure' }), sha: 's2' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({ statusUp: false });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'already-resolved', 'the guard runs before the bridge status check');
+  assert.equal(bridge.calls.filter((c) => c.op === 'ask').length, 0);
+  assert.equal(gh.files.has('tasks/pending/t1.json'), false);
+  assert.equal(readRepo(gh.files, 'tasks/failed/t1.error.json').error, 'earlier failure', 'the existing failed file is untouched');
+});
+
 test('empty pending folder (GitHub 404) is a no-op', async () => {
   const gh = makeFakeGitHub({}, { pending404: true });
   const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
