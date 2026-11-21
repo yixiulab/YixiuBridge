@@ -40,6 +40,20 @@
 //   pre-existing page text can never be mistaken for this turn's answer,
 //   and fails with a clear "no response appeared" error when no NEW model
 //   text ever shows up.
+// - Response detection (v0.3.6, task -009): structural, not single-
+//   selector. Each model turn is a <model-response> custom element inside
+//   a div.conversation-container; its rendered markdown is
+//   structured-content-container.model-response-text >
+//   .markdown.markdown-main-panel. The response query is scoped to the
+//   REAL history container (infinite-scroller.chat-history or
+//   [data-test-id="chat-history-container"]) — NEVER
+//   [data-test-id="conversation"], which on the real page matches the
+//   SIDEBAR conversation-list links: the 0.3.3–0.3.5 scope bug made every
+//   response query run inside a sidebar link, so ask_gemini failed with
+//   "no response appeared" while the answer was rendered on the page.
+//   A "no response appeared" failure now carries a structural dump of
+//   the conversation area (element counts, scope, last turns) so the
+//   next miss is diagnosable from the failed-task file alone.
 // - Send-button discovery (v0.3, ground truth from the user's real page,
 //   2026-11-21): the real Send button is an Angular Material button with
 //   NO usable aria-label — it carries a <mat-icon
@@ -140,8 +154,23 @@
       'button[aria-label*="Stop"]',
       'button[data-test-id="stop-button"]',
     ],
-    // Model response blocks, newest last. Markdown containers first, then
-    // generic response wrappers, then any long text block in the conversation.
+    // Model turns on the real Gemini page (v0.3.6, task -009). Structure
+    // confirmed by independent DOM analyses (Apr–Jul 2026) and by the -009
+    // failure itself: each exchange is a div.conversation-container; the
+    // model turn is a <model-response> custom element whose rendered
+    // markdown is structured-content-container.model-response-text >
+    // .markdown.markdown-main-panel. Layer 1 is tried before the legacy
+    // selectors below; leaf-most filtering (getResponseEls) drops a turn
+    // element whenever its inner markdown is also present, so one turn
+    // yields exactly one text.
+    RESPONSE_TURNS: [
+      'model-response .markdown',
+      'model-response structured-content-container.model-response-text',
+      'model-response',
+    ],
+    // Model response blocks, newest last. Legacy layouts / other builds:
+    // the old Bard-era .model-response-text, generic response wrappers,
+    // markdown containers, and the message-content custom element.
     RESPONSE_TEXT: [
       '.model-response-text',
       '[class*="response-content"]',
@@ -149,8 +178,17 @@
       'message-content',
     ],
     // The conversation scroll container (used to scope "latest response").
+    // REAL history containers only. NEVER [data-test-id="conversation"]:
+    // on the real page that selector matches the SIDEBAR conversation-list
+    // links (a[data-test-id="conversation"], one per saved chat) — the
+    // 0.3.3–0.3.5 scope bug (task -009): responseScope() returned the
+    // first sidebar link, so every response query ran inside a 20-character
+    // link title and found nothing, while the answer was rendered on the
+    // page. The mock page had invented [data-test-id="conversation"] as
+    // the chat container, so no test ever saw it.
     CONVERSATION: [
-      '[data-test-id="conversation"]',
+      'infinite-scroller.chat-history',
+      '[data-test-id="chat-history-container"]',
       'main',
       'body',
     ],
@@ -203,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.3.5';
+  var ADAPTER_VERSION = '0.3.6';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -553,8 +591,142 @@
       return c.el || doc;
     }
 
+    // Element children, as a plain array. Works on the real DOM
+    // (HTMLCollection) and the fake DOM (plain array) alike.
+    function childElements(el) {
+      var out = [];
+      if (!el || !el.children) return out;
+      var c = el.children;
+      for (var i = 0; i < c.length; i++) out.push(c[i]);
+      return out;
+    }
+
+    function isAncestorOf(a, b) {
+      var n = b && (b.parent || b.parentNode);
+      while (n) {
+        if (n === a) return true;
+        n = n.parent || n.parentNode;
+      }
+      return false;
+    }
+
+    // Drop any candidate that is an ancestor of another candidate: the
+    // model turn (<model-response>) and its inner markdown both match,
+    // but only the innermost text is the answer — keeping both would
+    // return the same answer twice (once with the action-button labels).
+    function leafMost(els) {
+      var out = [];
+      for (var i = 0; i < els.length; i++) {
+        var dominated = false;
+        for (var j = 0; j < els.length; j++) {
+          if (i !== j && isAncestorOf(els[i], els[j])) { dominated = true; break; }
+        }
+        if (!dominated) out.push(els[i]);
+      }
+      return out;
+    }
+
+    // Candidates in document order. queryAll concatenates per-selector
+    // results, so a legacy element from an old turn could sort after a
+    // structural element from the newest turn; getLatestResponseText
+    // takes the last one, so order must be real document order, not
+    // selector-group order.
+    function documentOrder(els) {
+      var set = [];
+      for (var i = 0; i < els.length; i++) {
+        if (set.indexOf(els[i]) === -1) set.push(els[i]);
+      }
+      var ordered = [];
+      var root = (doc && doc.documentElement) || doc;
+      (function walk(node) {
+        if (!node) return;
+        if (set.indexOf(node) !== -1) ordered.push(node);
+        var kids = childElements(node);
+        for (var i = 0; i < kids.length; i++) walk(kids[i]);
+      })(root);
+      return ordered;
+    }
+
+    // All model-response elements, leaf-most, in document order:
+    // Layer 1 — structural turns on the real page (<model-response> and
+    // its inner markdown); Layer 2 — legacy selectors for old layouts.
+    // The sidebar links (a[data-test-id="conversation"]) match none of
+    // these, so sidebar titles can never be read as an answer.
     function getResponseEls() {
-      return queryAll(responseScope(), SELECTORS.RESPONSE_TEXT);
+      var scope = responseScope();
+      var els = [];
+      var seen = [];
+      function add(list) {
+        for (var i = 0; i < list.length; i++) {
+          if (seen.indexOf(list[i]) === -1) { seen.push(list[i]); els.push(list[i]); }
+        }
+      }
+      add(queryAll(scope, SELECTORS.RESPONSE_TURNS));
+      add(queryAll(scope, SELECTORS.RESPONSE_TEXT));
+      return documentOrder(leafMost(els));
+    }
+
+    // One-line structural description of an element: tag, up to 3 classes,
+    // data-test-id, role. No text — see describeTurn for the snippet.
+    function describeEl(el) {
+      var s = el.tagName ? el.tagName.toLowerCase() : 'element';
+      var cls = attrOf(el, 'class');
+      if (cls) s += '.' + cls.trim().split(/\s+/).slice(0, 3).join('.');
+      var dtid = attrOf(el, 'data-test-id');
+      if (dtid) s += '[data-test-id="' + dtid.slice(0, 40) + '"]';
+      var role = attrOf(el, 'role');
+      if (role) s += '[role=' + role + ']';
+      return s;
+    }
+
+    // One turn in the dump: its own shape, its child tags, and the first
+    // ~60 chars of its text (a snippet for identification, never the
+    // answer itself). Home-screen text is never included: the hero
+    // greeting / suggestion chips must not leak into an error string,
+    // the same rule as for answers (task -006).
+    function describeTurn(el) {
+      var s = describeEl(el);
+      var kids = childElements(el);
+      if (kids.length) {
+        var tags = [];
+        for (var i = 0; i < kids.length && tags.length < 6; i++) {
+          tags.push(kids[i].tagName ? kids[i].tagName.toLowerCase() : '?');
+        }
+        s += ' > [' + tags.join(', ') + ']';
+      }
+      var full = textOf(el).replace(/\s+/g, ' ').trim();
+      if (full && !isHomeScreenText(full)) {
+        s += ' text="' + full.slice(0, 60) + '"';
+      }
+      return s;
+    }
+
+    // Structural dump of the conversation area, for the "no response
+    // appeared" error: counts of the response-shaped elements found
+    // document-wide, the scope in use, and the last up to 3 turns.
+    // Structural only — counts, tags, classes, short snippets. Never the
+    // full page text or the answer itself. Capped at ~2000 chars so the
+    // failed-task file stays readable.
+    function conversationStructureDump() {
+      var counts = {
+        'model-response': queryAll(doc, ['model-response']).length,
+        'user-query': queryAll(doc, ['user-query']).length,
+        'div.conversation-container': queryAll(doc, ['div.conversation-container']).length,
+        '.markdown': queryAll(doc, ['.markdown']).length,
+        '.model-response-text': queryAll(doc, ['.model-response-text']).length,
+        'message-content': queryAll(doc, ['message-content']).length,
+      };
+      var parts = [];
+      for (var k in counts) parts.push(k + '=' + counts[k]);
+      var lines = ['elements found: ' + parts.join(', ')];
+      lines.push('scope: ' + describeEl(responseScope()));
+      var turns = queryAll(doc, ['div.conversation-container']);
+      if (!turns.length) turns = childElements(responseScope());
+      var start = Math.max(0, turns.length - 3);
+      for (var i = start; i < turns.length; i++) {
+        lines.push('turn[' + i + ']: ' + describeTurn(turns[i]));
+      }
+      return lines.join(' | ').slice(0, 2000);
     }
 
     // Genuine model-response texts only: scoped to the conversation
@@ -951,7 +1123,7 @@
       if (!everLive) {
         return {
           ok: false,
-          error: 'gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: ' + ADAPTER_VERSION + ']',
+          error: 'gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: ' + ADAPTER_VERSION + '] Conversation structure: ' + conversationStructureDump(),
           partial: '',
           polls: polls,
           elapsedMs: Date.now() - startedAt,
