@@ -27,7 +27,7 @@ function parseSimple(sel) {
   // Returns { tag, id, classes[], attrs[] } or null if unsupported.
   const out = { tag: null, id: null, classes: [], attrs: [] };
   let rest = sel.trim();
-  const tagM = rest.match(/^([a-zA-Z][a-zA-Z0-9]*)/);
+  const tagM = rest.match(/^([a-zA-Z][a-zA-Z0-9-]*)/);
   if (tagM) { out.tag = tagM[1].toUpperCase(); rest = rest.slice(tagM[0].length); }
   while (rest.length) {
     if (rest[0] === '.') {
