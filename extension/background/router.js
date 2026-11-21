@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.3.3';
+    this.version = opts.version || '0.3.4';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -243,6 +243,15 @@
 
     var taskId = this._newTaskId();
     this.tasks.set(taskId, { status: 'running', startedAt: Date.now() });
+    // Register the task with the bridge RIGHT AWAY (v0.3.4): if the
+    // bridge's own call timer fires before the router's pending result
+    // reaches it (service worker suspended, /result post lost), the
+    // bridge can still hand the caller this task_id to poll — instead of
+    // a bare timeout error with no way to retrieve the answer (-007).
+    // The completion update in onAskResult overwrites this entry.
+    if (this.bridge && this.bridge.sendTaskUpdate) {
+      this.bridge.sendTaskUpdate({ type: 'task_update', taskId: taskId, task: { status: 'running', startedAt: Date.now() } }).catch(function () { /* bridge down — best effort */ });
+    }
     try {
       await chrome.tabs.sendMessage(tab.id, {
         from: 'yixiubridge-sw', tool: 'ask_gemini', taskId: taskId,
