@@ -4,6 +4,10 @@
 // no token, no real repo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   parseTask,
   taskFilePaths,
@@ -14,6 +18,10 @@ import {
   createBridgeCaller,
   processOneTask,
   DEFAULT_MODEL,
+  loadConfig,
+  saveConfig,
+  createFileLogger,
+  acquireLock,
 } from '../host/muse-runner.mjs';
 
 // ---------- fake GitHub (in-memory repo) ----------
@@ -73,7 +81,7 @@ function taskJson(id, prompt, extra = {}) {
   return JSON.stringify({ id, prompt, created_by: 'muse', created_at: '2026-11-21T10:00:00.000Z', ...extra });
 }
 
-function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1' } = {}) {
+function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, failBridgeTaskId = null, bridgeTaskId = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1' } = {}) {
   const calls = [];
   return {
     calls,
@@ -84,9 +92,10 @@ function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = nu
         const e = new Error(failWith);
         if (failCode) e.code = failCode;
         if (failAdapterVersion) e.adapterVersion = failAdapterVersion;
+        if (failBridgeTaskId) e.bridgeTaskId = failBridgeTaskId;
         throw e;
       }
-      return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion };
+      return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion, bridgeTaskId };
     },
   };
 }
@@ -372,6 +381,86 @@ test('createBridgeCaller marks a busy bridge with code "busy"', async () => {
   });
 });
 
+// ---------- long answers: poll after a bridge timeout (v0.3.4) ----------
+// Background: task -007 (2026-11-21) — the runner wrote a failed file
+// ("ask_gemini timed out after 240s") while the answer was sitting in the
+// Gemini tab: Gemini had answered the pomodoro question, generation just
+// took longer than the 240s cap. A bridge timeout that carries a task_id
+// must be polled, not failed.
+
+test('createBridgeCaller polls after a bridge timeout that carries a task_id and returns the late answer', async () => {
+  let taskCalls = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith('/call')) {
+      // The bridge-side timeout shape (ok:false + task_id): the ask is
+      // still running in the browser.
+      return jsonResponse({ ok: false, error: 'ask_gemini timed out after 240s — the task may still be running in the browser; poll get_answer with this task_id.', task_id: 'task_late' });
+    }
+    if (url.includes('/tasks/task_late')) {
+      taskCalls++;
+      if (taskCalls < 2) return jsonResponse({ status: 'running' });
+      return jsonResponse({ status: 'done', answer: 'late pomodoro code', model: 'Neon', elapsedMs: 260000, adapterVersion: '0.3.4' });
+    }
+    return jsonResponse({}, 404);
+  };
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10, overallCapMs: 60000 });
+  const res = await bridge.ask({ prompt: 'slow one', model: 'Neon', timeoutMs: 30000 });
+  assert.equal(res.answer, 'late pomodoro code');
+  assert.equal(res.bridgeTaskId, 'task_late', 'the late answer carries the bridge task id');
+  assert.equal(res.adapterVersion, '0.3.4');
+  assert.ok(taskCalls >= 2);
+});
+
+test('createBridgeCaller gives up only after the overall cap, and the error carries the bridge task_id', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/call')) {
+      return jsonResponse({ ok: true, result: { status: 'pending', task_id: 'task_stuck' } });
+    }
+    if (url.includes('/tasks/task_stuck')) return jsonResponse({ status: 'running' });
+    return jsonResponse({}, 404);
+  };
+  // Tiny overall cap for the test: 60ms of polling, then it must fail.
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10, overallCapMs: 60 });
+  await assert.rejects(bridge.ask({ prompt: 'q', model: 'Neon', timeoutMs: 30000 }), (e) => {
+    assert.match(e.message, /did not finish within/);
+    assert.match(e.message, /task_stuck/);
+    assert.equal(e.bridgeTaskId, 'task_stuck');
+    return true;
+  });
+});
+
+test('processOneTask failure records bridge_task_id in the failed file (v0.3.4)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'ask_gemini task task_x did not finish within 900s — poll get_answer with task_id task_x for the result',
+    failBridgeTaskId: 'task_x',
+  });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'failed');
+  assert.equal(res.bridgeTaskId, 'task_x');
+  const failed = readRepo(gh.files, 'tasks/failed/t1.error.json');
+  assert.equal(failed.bridge_task_id, 'task_x', 'the failed file names the bridge task so the answer can still be retrieved');
+  assert.equal(gh.files.has('tasks/pending/t1.json'), false);
+  const today = new Date();
+  const logPath = 'tasks/log/' + today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0') + '.json';
+  assert.equal(readRepo(gh.files, logPath)[0].bridge_task_id, 'task_x');
+});
+
+test('processOneTask success records bridge_task_id in the done file (v0.3.4)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({ bridgeTaskId: 'task_y' });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.equal(res.bridgeTaskId, 'task_y');
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').bridge_task_id, 'task_y');
+});
+
 // ---------- version self-check (v0.3.1) ----------
 // Background: task -003 (2026-11-21) failed with the 0.2.0 send-button
 // error while the panel showed 0.3.0 — the Gemini tab ran the old adapter
@@ -472,4 +561,110 @@ test('processOneTask failure records adapter_version from the error-string tag',
   assert.equal(res.status, 'failed');
   assert.equal(res.adapterVersion, '0.2.0');
   assert.equal(readRepo(gh.files, 'tasks/failed/t1.error.json').adapter_version, '0.2.0');
+});
+
+// ---------- stale lock, file log, BOM-tolerant config (v0.3.4) ----------
+// Background: task -008 sat unpicked for 8+ minutes because the runner
+// had died and its lock file was never reclaimed; the runner starts
+// minimized, so there was no window and no log to look at. And the
+// 17:17 updater run clobbered config.json (github_token lost), so the
+// restarted runner failed immediately with "no github_token".
+
+test('loadConfig tolerates a leading BOM (v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-config-'));
+  // Windows PowerShell 5.1 Set-Content -Encoding UTF8 writes a BOM; Node's
+  // JSON.parse chokes on it, so the runner used to fail to start with
+  // "no github_token" although the token was still in the file.
+  await writeFile(join(dir, 'config.json'), '\uFEFF' + JSON.stringify({ github_token: 'tok123' }), 'utf8');
+  const cfg = await loadConfig(dir);
+  assert.equal(cfg.github_token, 'tok123');
+});
+
+test('saveConfig merges instead of clobbering and leaves no temp file (v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-config-'));
+  await writeFile(join(dir, 'config.json'), JSON.stringify({ github_token: 'tok123', runner_interval_s: 30 }), 'utf8');
+  const cfg = await saveConfig(dir, { last_chrome_profile: 'Profile 21' });
+  assert.equal(cfg.github_token, 'tok123', 'the saved token must survive a merge');
+  assert.equal(cfg.runner_interval_s, 30);
+  assert.equal(cfg.last_chrome_profile, 'Profile 21');
+  const back = await loadConfig(dir);
+  assert.equal(back.github_token, 'tok123');
+  assert.equal(back.last_chrome_profile, 'Profile 21');
+  await assert.rejects(readFile(join(dir, 'config.json.tmp'), 'utf8'), 'no temp file may be left behind');
+});
+
+test('createFileLogger appends lines and rotates a log over 1 MiB (v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-log-'));
+  const logger = await createFileLogger(dir);
+  await logger.log('[2026-11-21T00:00:00.000Z] hello');
+  assert.match(await readFile(logger.path, 'utf8'), /hello/);
+  await writeFile(logger.path, 'x'.repeat(1024 * 1024 + 1), 'utf8');
+  const logger2 = await createFileLogger(dir);
+  assert.equal(logger2.path, logger.path);
+  const rotated = await readFile(logger.path + '.1', 'utf8');
+  assert.equal(rotated.length, 1024 * 1024 + 1, 'the oversized log moves to .log.1');
+  await logger2.log('fresh line');
+  assert.match(await readFile(logger.path, 'utf8'), /fresh line/);
+});
+
+test('acquireLock takes over a lock whose PID is dead, and the runner then processes a task (v0.3.4, -008)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-lock-'));
+  // A lock left behind by a dead runner: PID 99999999 can never be alive.
+  await writeFile(join(dir, 'muse-runner.lock'), '99999999\n');
+  const lines = [];
+  const lockPath = await acquireLock(dir, (m) => lines.push(m));
+  assert.ok(lockPath.endsWith('muse-runner.lock'));
+  assert.equal((await readFile(lockPath, 'utf8')).trim(), String(process.pid), 'the lock now belongs to this process');
+  assert.ok(lines.some((l) => /stale lock: pid 99999999 is dead/.test(l)));
+  // With the lock reclaimed, task processing works.
+  const gh = makeFakeGitHub({ 'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' } });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const res = await processOneTask({ github, bridge: makeFakeBridge(), log: () => {} });
+  assert.equal(res.status, 'done');
+  await unlink(lockPath);
+});
+
+test('acquireLock refuses when the lock PID is alive with a fresh heartbeat (v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-lock-'));
+  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' });
+  try {
+    await writeFile(join(dir, 'muse-runner.lock'), String(child.pid) + '\n');
+    await writeFile(join(dir, 'muse-runner.heartbeat'), JSON.stringify({ pid: child.pid, at: new Date().toISOString() }));
+    await assert.rejects(acquireLock(dir, () => {}), /already running/);
+    assert.equal((await readFile(join(dir, 'muse-runner.lock'), 'utf8')).trim(), String(child.pid), 'the live lock is untouched');
+  } finally {
+    child.kill();
+  }
+});
+
+test('acquireLock takes over when the lock PID is alive but its heartbeat is stale (v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-lock-'));
+  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' });
+  try {
+    await writeFile(join(dir, 'muse-runner.lock'), String(child.pid) + '\n');
+    const staleAt = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    await writeFile(join(dir, 'muse-runner.heartbeat'), JSON.stringify({ pid: child.pid, at: staleAt }));
+    const lines = [];
+    const lockPath = await acquireLock(dir, (m) => lines.push(m));
+    assert.equal((await readFile(lockPath, 'utf8')).trim(), String(process.pid), 'the lock now belongs to this process');
+    assert.ok(lines.some((l) => /stale lock/.test(l) && /heartbeat is stale/.test(l)));
+    await unlink(lockPath);
+  } finally {
+    child.kill();
+  }
+});
+
+test('acquireLock takes over when the lock PID is alive but there is no heartbeat file (pre-0.3.4 runner, v0.3.4)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-lock-'));
+  const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 60000)'], { stdio: 'ignore' });
+  try {
+    await writeFile(join(dir, 'muse-runner.lock'), String(child.pid) + '\n');
+    const lines = [];
+    const lockPath = await acquireLock(dir, (m) => lines.push(m));
+    assert.equal((await readFile(lockPath, 'utf8')).trim(), String(process.pid));
+    assert.ok(lines.some((l) => /stale lock/.test(l) && /heartbeat is missing/.test(l)));
+    await unlink(lockPath);
+  } finally {
+    child.kill();
+  }
 });
