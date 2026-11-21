@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YixiuBridge</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #1a1a2e; background: #f6f7f9; }
+  header { padding: 16px; background: #0b1a2e; color: #fff; }
+  header h1 { margin: 0; font-size: 18px; }
+  header h1 span { color: #06b6d4; }
+  header p { margin: 4px 0 0; font-size: 12px; color: #9fb3c8; }
+  main { padding: 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 14px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+  .card h2 { margin: 0 0 8px; font-size: 14px; }
+  .row { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; padding: 3px 0; }
+  .row b { font-weight: 600; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .dot.on { background: #16a34a; } .dot.off { background: #dc2626; }
+  button { cursor: pointer; border: 0; border-radius: 999px; padding: 10px 18px; font-size: 14px; font-weight: 600; }
+  .primary { background: #06b6d4; color: #fff; width: 100%; }
+  .primary:hover { background: #0891b2; }
+  .ghost { background: #eef2f7; color: #0b1a2e; }
+  textarea { width: 100%; height: 190px; resize: vertical; border: 1px solid #d7dee8; border-radius: 8px; padding: 8px; font: 12px/1.5 ui-monospace, Menlo, monospace; background: #fbfcfe; }
+  input[type=text] { width: 100%; border: 1px solid #d7dee8; border-radius: 8px; padding: 8px; font-size: 13px; }
+  .hint { font-size: 12px; color: #64748b; margin: 8px 0 0; }
+  .log { font: 11px/1.6 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow: auto; background: #0b1a2e; color: #d7dee8; border-radius: 8px; padding: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Yixiu<span>Bridge</span></h1>
+  <p>通用浏览器桥 · 100% 本地 · 照片不上传，数据不出本机</p>
+</header>
+<main>
+  <div class="card">
+    <h2>状态</h2>
+    <div class="row"><span>桥接服务</span><b id="st-bridge"><span class="dot off"></span>未连接</b></div>
+    <div class="row"><span>本机身份</span><b id="st-profile">—</b></div>
+    <div class="row"><span>当前控制者</span><b id="st-controller">—</b></div>
+    <div class="row"><span>版本</span><b id="st-version">0.1.0</b></div>
+  </div>
+
+  <div class="card">
+    <h2>配对（首次连接）</h2>
+    <p class="hint" style="margin-top:0">点下面按钮会打开 30 分钟配对窗口，并生成一句连接提示词。把提示词粘贴给你的 AI（Muse / Antigravity 等），第一个连上的 AI 自动获得信任，不用确认页和配对码。窗口过期或已被用掉就再点一次。</p>
+    <button class="primary" id="btn-pair">复制连接提示词</button>
+    <textarea id="prompt" readonly placeholder="点击上方按钮生成提示词…"></textarea>
+    <p class="hint">提示词本身就是授权凭证：只发给你信任的 AI，不要贴到公开地方。</p>
+  </div>
+
+  <div class="card">
+    <h2>本机身份（多 Profile 路由）</h2>
+    <p class="hint" style="margin-top:0">多个 Chrome 身份同时运行本插件时，AI 用下面的别名指定走哪一个，例如 work、personal。</p>
+    <input type="text" id="profile-label" placeholder="别名，例如 work">
+    <div style="height:8px"></div>
+    <button class="ghost" id="btn-label">保存别名</button>
+  </div>
+
+  <div class="card">
+    <h2>日志</h2>
+    <div class="log" id="log">就绪。</div>
+  </div>
+</main>
+<script src="sidepanel.js"></script>
+</body>
+</html>
