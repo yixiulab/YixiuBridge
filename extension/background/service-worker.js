@@ -14,8 +14,9 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.2.0';
+  var VERSION = '0.3.0';
   var PROFILE_KEY = 'yixiubridge.profile';
+  var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
   var profile = null;
   var bridge = null;
@@ -124,11 +125,46 @@ importScripts(
     chrome.sidePanel.open({ windowId: undefined }).catch(function () {});
   });
 
+  // Auto-update: once a minute, ask the bridge which version is on disk.
+  // The disk version changes when 一键启动.bat downloads a newer ZIP over
+  // the install folder. If the disk is newer than the running extension
+  // and we have not already reloaded for that version, reload the
+  // extension so the new code takes effect. Skipped while a task is
+  // running (retried next minute), and never loops thanks to the stored
+  // version. A failed fetch (bridge down) is silently skipped.
+  async function checkForUpdate() {
+    try {
+      var C = globalThis.YixiuBridgeConstants;
+      if (!C || !C.shouldAutoReload) return;
+      var manifestVersion = chrome.runtime.getManifest().version;
+      var ctrl = new AbortController();
+      var timer = setTimeout(function () { ctrl.abort(); }, 5000);
+      var res;
+      try {
+        res = await fetch('http://127.0.0.1:8765/status', { signal: ctrl.signal });
+      } finally { clearTimeout(timer); }
+      if (!res || !res.ok) return;
+      var st = await res.json();
+      var diskVersion = st && st.disk_version;
+      var stored = await chrome.storage.local.get(UPDATE_CHECK_KEY);
+      var lastReloaded = stored && stored[UPDATE_CHECK_KEY];
+      if (!C.shouldAutoReload(manifestVersion, diskVersion, lastReloaded)) return;
+      if (router) {
+        var tasks = router.tasks ? Array.from(router.tasks.values()) : [];
+        if (tasks.some(function (t) { return t && t.status === 'running'; })) return;
+      }
+      await chrome.storage.local.set({ [UPDATE_CHECK_KEY]: diskVersion });
+      chrome.runtime.reload();
+    } catch (e) { /* bridge down or storage unavailable — try next minute */ }
+  }
+
   // Keep-alive: wakes the worker at least once a minute so the SSE loop
-  // resumes promptly after Chrome suspends it.
+  // resumes promptly after Chrome suspends it. The same tick also checks
+  // for a newer version on disk (auto-update, see checkForUpdate).
   chrome.alarms.onAlarm.addListener(function (alarm) {
-    if (alarm.name === 'yixiubridge-keepalive' && bridge && !bridge.connected) {
-      bridge.connect();
+    if (alarm.name === 'yixiubridge-keepalive') {
+      if (bridge && !bridge.connected) bridge.connect();
+      checkForUpdate();
     }
   });
 
