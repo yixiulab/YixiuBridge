@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable' } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -100,7 +100,7 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
         if (m.locked) return; // locked items do nothing
         for (const mm of models) mm.selected = (mm === m);
         picker.textContent = pickerText();
-        closeMenu();
+        if (!keepMenuOpenOnSelect) closeMenu();
       });
       menu.appendChild(item);
     }
@@ -132,7 +132,37 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   app.appendChild(box);
 
   // Send button: clicking starts the simulated streaming response.
-  const send = new FakeElement('button', { 'aria-label': 'Send message' });
+  // Default shape mirrors the REAL Gemini page (Nov 2026, user's inspect):
+  // an Angular Material button with NO aria-label, carrying a <mat-icon
+  // data-mat-icon-name="arrow_upward">. Other sendKind values build the
+  // classic/fallback shapes the adapter must also find:
+  //   'aria-label' classic button, 'fonticon' icon with fonticon only,
+  //   'title' button labelled by title, 'testid' data-test-id button,
+  //   'svg' inline SVG arrow icon, 'role' div acting as a button.
+  let send;
+  if (sendKind === 'aria-label') {
+    send = new FakeElement('button', { 'aria-label': 'Send message' });
+  } else if (sendKind === 'fonticon') {
+    send = new FakeElement('button', { class: 'mat-mdc-icon-button' });
+    const icon = new FakeElement('mat-icon', { fonticon: 'arrow_upward', 'aria-hidden': 'true' });
+    icon.textContent = 'arrow_upward';
+    send.appendChild(icon);
+  } else if (sendKind === 'title') {
+    send = new FakeElement('button', { title: '发送消息' });
+  } else if (sendKind === 'testid') {
+    send = new FakeElement('button', { 'data-test-id': 'send-btn' });
+  } else if (sendKind === 'svg') {
+    send = new FakeElement('button', { class: 'icon-btn' });
+    const svg = new FakeElement('svg', { class: 'arrow-up-icon', 'aria-label': 'arrow upward' });
+    send.appendChild(svg);
+  } else if (sendKind === 'role') {
+    send = new FakeElement('div', { role: 'button', 'aria-label': '发送' });
+  } else { // 'mat-icon' (default, real page shape)
+    send = new FakeElement('button', { class: 'mat-mdc-icon-button' });
+    const icon = new FakeElement('mat-icon', { 'data-mat-icon-name': 'arrow_upward', fonticon: 'arrow_upward', 'aria-hidden': 'true' });
+    icon.textContent = 'arrow_upward';
+    send.appendChild(icon);
+  }
   app.appendChild(send);
 
   // Conversation container + response element (created on send).
