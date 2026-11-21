@@ -1,0 +1,5 @@
+{
+  "id": "task-20261121-pomodoro-002",
+  "error": "ask_gemini failed: Gemini content script did not answer — are you logged in to gemini.google.com in this Chrome profile?",
+  "failed_at": "2026-11-21T13:33:38.800Z"
+}
