@@ -15,10 +15,16 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.3.0';
+    this.version = opts.version || '0.3.1';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
+    // How long _pingContentScript keeps retrying before giving up (30s by
+    // default; tests pass a small value). The tab reports 'complete'
+    // before document_idle content scripts are injected, so a short
+    // retry window is needed — but a tab opened before an extension
+    // update never answers at all, and _ensureGeminiTab reloads it once.
+    this._pingTimeoutMs = (opts.pingTimeoutMs !== undefined) ? opts.pingTimeoutMs : 30000;
   }
 
   Router.prototype._newTaskId = function () {
@@ -42,9 +48,9 @@
   Router.prototype.onAskResult = function (taskId, result) {
     var self = this;
     if (result && result.ok) {
-      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs });
+      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs, adapterVersion: result.adapter_version || null });
     } else {
-      this._setTask(taskId, { status: 'failed', error: (result && result.error) || 'unknown gemini error' });
+      this._setTask(taskId, { status: 'failed', error: (result && result.error) || 'unknown gemini error', adapterVersion: (result && result.adapter_version) || null });
     }
     // Tell the bridge so get_answer works even after the original call timed out.
     var t = this.tasks.get(taskId);
@@ -159,12 +165,18 @@
       try {
         var res = await chrome.tabs.sendMessage(tabId, { from: 'yixiubridge-sw', tool: 'ping' });
         if (res && res.ok) {
-          // A missing version means the tab still runs the content script
-          // from before the extension was updated (Chrome does not
-          // re-inject content scripts on extension reload).
-          if (!res.version || res.version !== this.version) return 'stale';
+          // BOTH versions must match the running extension: the content
+          // script and the adapter are separate files, and a tab opened
+          // before an extension update can run a stale copy of either.
+          // A missing adapter_version means the tab predates the version
+          // handshake (pre-0.3.1) — stale either way.
+          if (!res.version || res.version !== this.version
+            || !res.adapter_version || res.adapter_version !== this.version) return 'stale';
           return 'ok';
         }
+        // The script answered but does not know the ping tool: it predates
+        // the version handshake (pre-0.3.0) — stale, reload the tab once.
+        if (res && res.ok === false) return 'stale';
       } catch (e) { /* content script not ready yet */ }
       await new Promise(function (r) { setTimeout(r, 500); });
     }
@@ -172,7 +184,12 @@
   };
 
   // Find a Gemini tab (open one if needed) and wait until its content
-  // script answers. Shared by ask_gemini and list_models.
+  // script answers. Shared by ask_gemini and list_models. A tab opened
+  // before the extension was updated runs an orphaned or stale content
+  // script (Chrome does not re-inject on extension reload): it either
+  // never answers or answers with an old version. Either way the tab is
+  // reloaded ONCE so the current adapter loads, then pinged again. Never
+  // more than once — a second failure is a real error, not a stale tab.
   Router.prototype._ensureGeminiTab = async function () {
     var tab = await this._findGeminiTab();
     if (!tab) {
@@ -180,20 +197,20 @@
     }
     var ready = await this._waitForTabReady(tab.id, 30000);
     if (!ready) throw new Error('Gemini tab did not finish loading within 30s');
-    var cs = await this._pingContentScript(tab.id, 30000);
-    if (cs === 'stale') {
-      // The tab still runs the old content script (see _pingContentScript).
-      // Reload the tab once so the new adapter loads, then ping again.
+    var cs = await this._pingContentScript(tab.id, this._pingTimeoutMs);
+    if (cs === 'stale' || cs === false) {
+      // Stale version, or no answer at all (orphaned script after an
+      // extension reload). Reload once and re-check.
       await chrome.tabs.reload(tab.id);
       ready = await this._waitForTabReady(tab.id, 30000);
       if (!ready) throw new Error('Gemini tab did not finish loading within 30s');
-      cs = await this._pingContentScript(tab.id, 30000);
+      cs = await this._pingContentScript(tab.id, this._pingTimeoutMs);
       if (cs === 'stale') {
         throw new Error('Gemini content script is still an old version after reloading the tab — reload the extension in chrome://extensions (it should show ' + this.version + ') and try again');
       }
     }
     if (cs !== 'ok') {
-      throw new Error('Gemini content script did not answer — are you logged in to gemini.google.com in this Chrome profile?');
+      throw new Error('Gemini content script did not answer even after reloading the tab once — are you logged in to gemini.google.com in this Chrome profile?');
     }
     return tab;
   };
@@ -206,7 +223,11 @@
     } catch (e) {
       throw new Error('list_models: could not reach the Gemini content script: ' + e.message);
     }
-    if (!res || !res.ok) throw new Error('list_models: ' + ((res && res.error) || 'content script returned no result'));
+    if (!res || !res.ok) {
+      var av = res && res.adapter_version;
+      throw new Error('list_models: ' + ((res && res.error) || 'content script returned no result')
+        + (av ? ' [adapter_version: ' + av + ']' : ''));
+    }
     return res.result;
   };
 
@@ -234,14 +255,18 @@
 
     var finished = await this._waitForTask(taskId, timeoutMs);
     if (finished.status === 'done') {
-      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId };
+      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId, adapter_version: finished.adapterVersion || null };
     }
     if (finished.status === 'failed') {
-      throw new Error('ask_gemini: ' + (finished.error || 'Gemini answer failed'));
+      // The version tag travels in the error string so it survives the
+      // bridge (plain-string error channel) and the runner's failed file:
+      // the next stale-adapter failure is diagnosed from the text alone.
+      throw new Error('ask_gemini: ' + (finished.error || 'Gemini answer failed')
+        + (finished.adapterVersion ? ' [adapter_version: ' + finished.adapterVersion + ']' : ''));
     }
     // Still running after timeout: return pending; the task keeps running and
     // the bridge is notified via task_update when it finishes.
-    return { status: 'pending', task_id: taskId, note: 'answer still streaming — poll get_answer with this task_id' };
+    return { status: 'pending', task_id: taskId, adapter_version: null, note: 'answer still streaming — poll get_answer with this task_id' };
   };
 
   Router.prototype._getAnswer = function (params) {
