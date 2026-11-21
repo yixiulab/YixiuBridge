@@ -1,1 +1,0 @@
-{"id": "task-20261121-pomodoro-001", "prompt": "做一个番茄钟网页，单文件 HTML，有开始/暂停/重置按钮，25 分钟工作、5 分钟休息，时间到了响一声（用 Web Audio API），界面要好看现代。只给完整代码，不要解释。", "model": "Neon", "timeout_ms": 180000, "created_by": "muse", "created_at": "2026-11-21T13:30:00+01:00"}
