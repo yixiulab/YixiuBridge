@@ -12,6 +12,14 @@ export class FakeEvent {
   preventDefault() { this.defaultPrevented = true; }
 }
 
+export class FakeKeyboardEvent extends FakeEvent {
+  constructor(type, opts = {}) {
+    super(type, opts);
+    this.key = opts.key || '';
+    this.code = opts.code || '';
+  }
+}
+
 function parseSimple(sel) {
   // Returns { tag, id, classes[], attrs[] } or null if unsupported.
   const out = { tag: null, id: null, classes: [], attrs: [] };
@@ -176,6 +184,7 @@ export class FakeDocument {
 export class FakeWindow {
   constructor() {
     this.Event = FakeEvent;
+    this.KeyboardEvent = FakeKeyboardEvent;
     this.HTMLTextAreaElement = undefined; // forces the adapter's direct-assignment path
     this.HTMLInputElement = undefined;
   }
