@@ -21,6 +21,12 @@
 //   text is unchanged for ASK_GEMINI_STABLE_MS (default 2s). Either signal
 //   alone is not enough: the stop button can flicker, and text can pause
 //   mid-stream.
+// - Send verification: after clicking Send, the adapter checks the message
+//   actually left the box (streaming started, box cleared, or a new
+//   response appeared). If not, it retries with an Enter keydown, then
+//   fails fast with a clear error instead of waiting out the full timeout
+//   for a message that was never sent.
+
 // - The adapter NEVER throws a bare error from ask(): it returns a structured
 //   { ok:false, error } object, and the tool handler turns that into an MCP
 //   error string. Timeouts are explicit, never silent.
@@ -44,12 +50,16 @@
       'textarea',
     ],
     // Send button. aria-labels vary by locale; the data-test-id and the
-    // "send" icon button are the stable fallbacks.
+    // "send" icon button are the stable fallbacks. Chinese UI labels
+    // included: the page the user actually sees is localised.
     SEND_BUTTON: [
       'button[aria-label="Send message"]',
       'button[aria-label*="Send"]',
       'button[data-test-id="send-button"]',
       'button[aria-label*="send"]',
+      'button[aria-label="发送消息"]',
+      'button[aria-label*="发送"]',
+      'button.send-button',
     ],
     // Shown while the model is streaming; disappears when it is done.
     STOP_BUTTON: [
@@ -78,6 +88,7 @@
     timeoutMs: 180000,
     pollMs: 500,
     stableMs: 2000,
+    sendCheckMs: 1000,
     model: 'gemini-web',
   };
 
@@ -135,11 +146,31 @@
     } catch (e) { /* event dispatch is best-effort */ }
   }
 
+  // Fallback submit: an Enter keydown on the prompt box, the way a user
+  // submits. Some layouts only wire Enter, or the clicked button turns out
+  // to be a decoy (e.g. a "Send feedback" button that also matches).
+  function dispatchEnter(box, win) {
+    var W = win || (typeof window !== 'undefined' ? window : globalThis);
+    try {
+      var ev;
+      if (typeof W.KeyboardEvent === 'function') {
+        ev = new W.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
+      } else if (typeof W.Event === 'function') {
+        ev = new W.Event('keydown', { bubbles: true, cancelable: true });
+        ev.key = 'Enter';
+      } else {
+        return;
+      }
+      box.dispatchEvent(ev);
+    } catch (e) { /* best effort */ }
+  }
+
   function createAdapter(doc, opts) {
     opts = opts || {};
     var timeoutMs = opts.timeoutMs || DEFAULTS.timeoutMs;
     var pollMs = opts.pollMs || DEFAULTS.pollMs;
     var stableMs = opts.stableMs || DEFAULTS.stableMs;
+    var sendCheckMs = (opts.sendCheckMs !== undefined) ? opts.sendCheckMs : DEFAULTS.sendCheckMs;
     var win = opts.win || (typeof window !== 'undefined' ? window : globalThis);
 
     function findPromptBox() {
@@ -219,6 +250,7 @@
         if (!box.el) {
           return { ok: false, error: 'gemini prompt box not found — UI may have changed (tried: ' + SELECTORS.PROMPT_BOX.join(' | ') + ')' };
         }
+        var beforeText = getLatestResponseText();
         fillPromptBox(box.el, String(prompt), win);
         var send = findSendButton();
         if (!send.el) {
@@ -229,6 +261,27 @@
         }
         try { send.el.click(); } catch (e) {
           return { ok: false, error: 'gemini send button click failed: ' + (e && e.message ? e.message : String(e)) };
+        }
+        // Verify the message actually left the box: a click can land on a
+        // decoy button, or the page can ignore it. Sent = streaming started,
+        // or the box cleared, or a new response appeared. If not sent, retry
+        // with Enter; if that also fails, fail fast with a clear error
+        // instead of waiting out the whole timeout for nothing.
+        var confirmSent = async function () {
+          await sleep(sendCheckMs);
+          if (isStreaming()) return true;
+          if (!textOf(box.el)) return true;
+          var now = getLatestResponseText();
+          if (now && now !== beforeText) return true;
+          return false;
+        };
+        var sent = await confirmSent();
+        if (!sent) {
+          dispatchEnter(box.el, win);
+          sent = await confirmSent();
+        }
+        if (!sent) {
+          return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed.' };
         }
         var done = await waitForCompletion(startedAt, deadline);
         if (!done.ok) return done;
