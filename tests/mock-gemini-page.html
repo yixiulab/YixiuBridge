@@ -8,34 +8,71 @@
   live-adapter checks. The automated tests use tests/mock-gemini.mjs (a fake
   DOM with the same shape) — this file is not executed by `npm test`.
 
-  Shape the adapter expects:
+  Shape the adapter expects (real Gemini page, Nov 2026 — confirmed by
+  independent DOM analyses Apr–Jul 2026 and by the -009 failure):
+    * sidebar conversation list: a[data-test-id="conversation"] — NOT the
+      chat container; the adapter must never scope its response query to it
+      (the 0.3.3–0.3.5 scope bug: responseScope() returned the first
+      sidebar link, so ask_gemini failed with "no response appeared" while
+      the answer was rendered on the page).
+    * chat history: infinite-scroller.chat-history (or
+      [data-test-id="chat-history-container"])
+    * one turn: div.conversation-container
+        user-query > .query-text > p.query-text-line
+        model-response
+          structured-content-container.model-response-text
+            > .markdown.markdown-main-panel
     * prompt box: div[contenteditable][aria-label*="Ask Gemini"]
-    * send button: button[aria-label="Send message"]
+    * send button: Angular Material button carrying
+      <mat-icon data-mat-icon-name="arrow_upward">
     * while streaming: button[aria-label="Stop generating"] present
-    * answer: .model-response-text (newest last)
-  Clicking Send starts a fake stream that appends chunks, then removes the
-  stop button — the adapter's completion signal.
+  Clicking Send appends a new turn and streams chunks into its markdown
+  block, then removes the stop button — the adapter's completion signal.
 -->
 <style>
   body { font-family: sans-serif; max-width: 640px; margin: 40px auto; }
   [contenteditable] { border: 1px solid #ccc; border-radius: 12px; padding: 12px; min-height: 48px; }
   button { border-radius: 999px; padding: 8px 18px; margin-top: 8px; }
-  .model-response-text { margin-top: 16px; padding: 12px; background: #f6f7f9; border-radius: 12px; white-space: pre-wrap; }
+  .markdown { margin-top: 16px; padding: 12px; background: #f6f7f9; border-radius: 12px; white-space: pre-wrap; }
+  .sidebar a { display: block; color: #555; font-size: 13px; margin-bottom: 4px; }
+  user-query { display: block; background: #eef; border-radius: 12px; padding: 10px; margin-top: 12px; }
 </style>
 </head>
 <body>
+  <div class="sidebar">
+    <a data-test-id="conversation"><span class="conversation-title">黑洞的定义</span></a>
+    <a data-test-id="conversation"><span class="conversation-title">光合作用定义</span></a>
+  </div>
   <h1>Gemini (mock)</h1>
-  <div data-test-id="conversation"></div>
+  <infinite-scroller class="chat-history" id="history"></infinite-scroller>
   <div contenteditable="true" aria-label="Ask Gemini" id="prompt-box"></div>
   <button aria-label="Send message" id="send">Send</button>
   <script>
     (function () {
       var send = document.getElementById('send');
+      var box = document.getElementById('prompt-box');
       send.addEventListener('click', function () {
-        var convo = document.querySelector('[data-test-id="conversation"]');
-        var resp = document.createElement('div');
-        resp.className = 'model-response-text';
-        convo.appendChild(resp);
+        var history = document.getElementById('history');
+        var turn = document.createElement('div');
+        turn.className = 'conversation-container';
+        var uq = document.createElement('user-query');
+        var qt = document.createElement('div');
+        qt.className = 'query-text';
+        var line = document.createElement('p');
+        line.className = 'query-text-line';
+        line.textContent = box.textContent;
+        qt.appendChild(line);
+        uq.appendChild(qt);
+        turn.appendChild(uq);
+        var mr = document.createElement('model-response');
+        var scc = document.createElement('structured-content-container');
+        scc.className = 'model-response-text';
+        var md = document.createElement('div');
+        md.className = 'markdown markdown-main-panel';
+        scc.appendChild(md);
+        mr.appendChild(scc);
+        turn.appendChild(mr);
+        history.appendChild(turn);
         var stop = document.createElement('button');
         stop.setAttribute('aria-label', 'Stop generating');
         stop.textContent = 'Stop';
@@ -43,7 +80,7 @@
         var chunks = ['4', ' is ', 'the answer.'];
         var i = 0;
         (function step() {
-          if (i < chunks.length) { resp.textContent += chunks[i]; i++; setTimeout(step, 300); }
+          if (i < chunks.length) { md.textContent += chunks[i]; i++; setTimeout(step, 300); }
           else stop.remove();
         })();
       });
