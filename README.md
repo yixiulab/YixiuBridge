@@ -39,7 +39,7 @@ node bin/yixiubridge.mjs bridge
 # 「Muse 直接指挥 Gemini」一节：github-token -> bridge -> runner。
 ```
 
-## MCP 工具（v0.3.0）
+## MCP 工具（v0.3.1）
 
 | 工具 | 作用 |
 |---|---|
@@ -104,13 +104,15 @@ node bin/yixiubridge.mjs runner
 
 > 令牌只存在你电脑 `~/.yixiubridge/config.json` 的 `github_token` 字段里（文件权限 0600），只发给 api.github.com。想收回就去 GitHub 网页删掉那个 PAT，或删 config.json 里这一行。详见 [SECURITY.md](SECURITY.md)。
 
-## 一键启动与自动更新（v0.3 新增）
+## 一键启动与自动更新（v0.3 新增，v0.3.1 修第 7 步）
 
-**这次是最后一次手动更新。** 更新到 0.3.0 之后，以后每次只需要双击仓库根目录的 **`一键启动.bat`**，它会自己完成：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner → 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件。
+**v0.3.1 不用再手动更新。** 你电脑里已经有 0.3.0 的一键启动.bat，直接双击它就行：它会下载 0.3.1 覆盖，下载完新版启动脚本自动接管继续执行（一次双击跑完新逻辑）。之后每次也只需要双击它：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner → 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件、不用再手动下载 ZIP。
+
+v0.3.1 修了第 7 步找 Chrome 的两个 bug：(1) 扫描结果误存在 PowerShell 自动变量 `$matches` 里，被 `-match` 改写成空对象，导致身份名为空、chrome.exe 路径为 Null——现在改用普通变量，且全脚本不再用 `-match`；(2) Chrome 运行时 `Secure Preferences` 可能读不到，旧脚本静默跳过——现在读不到会告警并列出哪些身份读不到，还多了 `Local Extension Settings\<扩展 ID>` 这条证据；一个身份都匹配不到时绝不乱开浏览器。报错也改实话实说了：会写明第几步失败、桥和 runner 各自起了没有。
 
 工作原理：
 
-- `一键启动.bat` 把 `scripts/update-and-start.ps1` 复制到 `%TEMP%` 后再执行——这样解压覆盖仓库文件夹时，不会动到正在运行的脚本自身。
+- `一键启动.bat` 把 `scripts/update-and-start.ps1` 复制到 `%TEMP%` 后再执行——这样解压覆盖仓库文件夹时，不会动到正在运行的脚本自身。下载完如果新版脚本变了，会比对哈希、改用新版脚本继续执行（一次双击跑完新逻辑，不用双击两次）。
 - 更新用 GitHub 令牌（只从本机 `~/.yixiubridge/config.json` 读，`Authorization` 头只发给 `codeload.github.com`，绝不打印）下载 main 分支 ZIP；没有令牌就跳过更新、只启动服务，并明说原因。
 - 桥的 `/status` 多了一个 `disk_version` 字段，每次调用都现读磁盘上的 `package.json`（不是启动时缓存的版本）。插件 service worker 用 `chrome.alarms` 每 60 秒查一次：如果磁盘版本比插件当前版本新、且不是上次已自动重载过的版本，就调 `chrome.runtime.reload()` 自动重载插件。更新完一分钟内插件自己变成最新版，不用手动重载。
 - 重启桥时只停占 8765 端口的 **Node** 进程；如果端口被别的程序占了，不停它、只提示。启动 runner 前先看锁文件对应的进程还活不活着，活着就跳过。
@@ -158,5 +160,18 @@ npm run check     # node --check 全部 JS 文件
 
 - v0.2（已做完）：`list_models` + `ask_gemini` 选模型/思考等级 + muse-runner（Muse 经 GitHub 任务通道直接指挥 Gemini）
 - v0.3（已做完）：Gemini 发送按钮修复（按 `arrow_upward` 图标定位 + 放宽搜索 + 失败自带诊断）+ 一键更新/启动（双击 `一键启动.bat`）+ 插件自动重载（`disk_version` + alarms 自检）
+- v0.3.1（已做完）：修一键启动第 7 步（`$matches` 自动变量 bug、Secure Preferences 读不到时告警 + `Local Extension Settings` 第二证据、找不到身份绝不乱开浏览器、报错按步骤如实汇报）+ 下载后新版脚本自动接管 + **版本自检**（见下）
 - v0.4：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
 - v0.5：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
+
+## 版本自检（v0.3.1 新增）
+
+起因：2026-11-21 任务 -003 失败的报错和 0.2.0 一字不差——Gemini 标签页里跑的还是旧适配器，尽管侧边栏显示 0.3.0、标签页也刷新过。Chrome 在插件重载后不会给已开的标签页重注内容脚本，旧适配器就一直跑着，而报错里看不出版本，只能靠猜。
+
+现在不用再猜：
+
+- **每次提问都带版本号**：适配器在每次 `ask` / `list_models` 的返回和报错里都带 `adapter_version`（和发布版本号一致）；失败文件的 `error` 里也会写 `[adapter_version: 0.2.0]`。
+- **提问前先握手**：`ask` / `list_models` 之前先 ping 标签页里的内容脚本，同时核对内容脚本版本和适配器版本。版本对不上、或脚本根本不回答（插件重载后旧脚本已失效），就自动刷新该标签页**一次**再试；刷新后还不行才报错，绝不循环刷。
+- **runner 日志里写明版本**：每个任务开始前记一行 `bridge v0.3.1 (disk v0.3.1), 1 extension connected — asking task …`；答完（或失败）后把 `adapter_version` 也写进完成文件、失败文件和每日用量日志；桥版本和适配器版本不一样时，日志里明确打一行 `⚠ 版本不一致：bridge v0.3.1，但 Gemini 适配器 v0.2.0 — …请双击 一键启动.bat 更新（或关闭 Gemini 标签页重开一个）后再试。`
+
+如果你在日志或失败文件里看到 `版本不一致`，意思就是：标签页里的适配器是旧的。双击一次 `一键启动.bat`（它会更新并重启桥和 runner，插件一分钟内自动重载），再不行就关掉 Gemini 标签页重开一个。
