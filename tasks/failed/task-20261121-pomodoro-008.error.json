@@ -1,0 +1,7 @@
+{
+  "id": "task-20261121-pomodoro-008",
+  "error": "ask_gemini timed out after 240s — the task may still be running in the browser; poll get_answer if it returned a task_id.",
+  "adapter_version": null,
+  "bridge_version": "0.3.3",
+  "failed_at": "2026-11-21T16:44:39.863Z"
+}
