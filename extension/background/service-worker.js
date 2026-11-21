@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.3.6';
+  var VERSION = '0.3.7';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -176,6 +176,13 @@ importScripts(
     chrome.alarms.create('yixiubridge-keepalive', { periodInMinutes: 1 });
   });
 
-  // Boot.
+  // Boot: make sure the keep-alive alarm exists even when the worker was
+  // restarted by chrome.runtime.reload() (v0.3.7: onStartup does not
+  // reliably fire after a reload, and without the alarm a suspended
+  // worker never wakes to reconnect — the 2026-11-21 0.3.6 update left
+  // the bridge with no extension for 12 minutes until the user opened
+  // Chrome by hand). create() is idempotent; the alarm only wakes the
+  // worker once a minute, it does not keep Chrome itself running.
+  try { chrome.alarms.create('yixiubridge-keepalive', { periodInMinutes: 1 }); } catch (e) { /* alarms unavailable in tests */ }
   loadProfile().then(function () { startBridge(); });
 })();
