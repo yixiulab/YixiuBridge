@@ -520,7 +520,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, bridgeTaskId: taskId };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, bridgeTaskId: taskId };
       }
       if (t.status === 'failed') {
         // Keep the version tag in the message (it lands in the failed
@@ -574,7 +574,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
     const r = out.result || {};
     if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, overallDeadline, overallCapMs);
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, bridgeTaskId: r.task_id || null };
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, bridgeTaskId: r.task_id || null };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
@@ -732,6 +732,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     asked_model: askedModel,
     asked_thinking: askedThinking,
     answered_model: answer.model || null,
+    thinking_warning: answer.thinkingWarning || null,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
     bridge_task_id: bridgeTaskId,
