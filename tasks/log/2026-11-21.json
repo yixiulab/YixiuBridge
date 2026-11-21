@@ -106,5 +106,18 @@
     "elapsed_ms": 43411,
     "error": null,
     "at": "2026-11-21T19:25:58.114Z"
+  },
+  {
+    "id": "task-20261121-bridge-040-001",
+    "status": "done",
+    "prompt": "为 YixiuBridge 写 v0.4.0 的在线更新器模块。背景：现在更新靠下载整个 ZIP 包再解压覆盖，又重又容易在半路出错，还没有回滚。我们要改成在线更新：只拉改过的文件，验完再换，出问题能回滚。\n\n你要写一个独立模块 host/online-updater.mjs（Node ESM，只用内置模块，不许引入新依赖）。它运行在用户的 Windows 电脑上，安装目录调用时传进来（例如 C:…",
+    "asked_model": "Neon",
+    "answered_model": "Neon",
+    "adapter_version": "0.3.6",
+    "bridge_version": "0.3.6",
+    "bridge_task_id": "task_mwqups661dycnv",
+    "elapsed_ms": 58532,
+    "error": null,
+    "at": "2026-11-21T20:20:17.044Z"
   }
 ]
