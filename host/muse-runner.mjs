@@ -48,6 +48,9 @@ import {
 export const REPO = 'yixiulab/YixiuBridge';
 export const GITHUB_API = 'https://api.github.com';
 export const DEFAULT_MODEL = 'Neon'; // recommended high model (highest unlocked item)
+// Thinking level default (user's standing preference, 2026-11-21):
+// Gemini's 思考等级 prefers 高. A task may override it per task.
+export const DEFAULT_THINKING = '高';
 export const DEFAULT_INTERVAL_S = 60;
 export const DEFAULT_DATA_DIR = join(homedir(), '.yixiubridge');
 export const RUNNER_CLIENT_ID = 'muse-runner/' + C.EXTENSION_VERSION;
@@ -113,6 +116,20 @@ export async function saveConfig(dataDir, patch) {
 // ---------- task files (pure) ----------
 
 // Validate + normalise a task file's JSON. Throws a clear error on bad input.
+export function parseThinking(value, sourceName) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value !== 'string') {
+    throw new Error('task thinking must be a string （高/中/低） in ' + (sourceName || 'task'));
+  }
+  const t = value.trim();
+  const alias = { high: '高', medium: '中', low: '低' };
+  const norm = alias[t.toLowerCase()] || t;
+  if (norm !== '高' && norm !== '中' && norm !== '低') {
+    throw new Error('task thinking must be 高/中/低 (got "' + t + '") in ' + (sourceName || 'task'));
+  }
+  return norm;
+}
+
 export function parseTask(raw, sourceName) {
   let data;
   try {
@@ -133,6 +150,7 @@ export function parseTask(raw, sourceName) {
     id: data.id,
     prompt: data.prompt,
     model: (typeof data.model === 'string' && data.model.trim()) ? data.model.trim() : null,
+    thinking: parseThinking(data.thinking, sourceName),
     timeout_ms: Number.isFinite(data.timeout_ms) ? data.timeout_ms : null,
     created_by: data.created_by || 'muse',
     created_at: data.created_at || null,
@@ -155,12 +173,13 @@ export function logFilePath(date) {
   return 'tasks/log/' + y + '-' + m + '-' + day + '.json';
 }
 
-export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, answeredModel = null, adapterVersion = null, bridgeVersion = null, bridgeTaskId = null }) {
+export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, askedThinking = null, answeredModel = null, adapterVersion = null, bridgeVersion = null, bridgeTaskId = null }) {
   return {
     id: task.id,
     status, // 'done' | 'failed'
     prompt: task.prompt.length > 200 ? task.prompt.slice(0, 200) + '…' : task.prompt,
     asked_model: askedModel,
+    asked_thinking: askedThinking,
     answered_model: answeredModel,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
@@ -517,7 +536,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
   }
 
-  async function ask({ prompt, model, timeoutMs }) {
+  async function ask({ prompt, model, thinking, timeoutMs }) {
     const timeoutS = Math.min(Math.max(Math.round((timeoutMs || 180000) / 1000), 5), MAX_ASK_TIMEOUT_S);
     // Overall budget for the whole ask, including polling after a
     // timeout/pending: 15 minutes from the ask start (v0.3.4, task -007 —
@@ -532,7 +551,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       const res = await fetchImpl(bridgeUrl + '/call', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tool: 'ask_gemini', params: { prompt, model, timeout_s: timeoutS }, clientId: RUNNER_CLIENT_ID }),
+        body: JSON.stringify({ tool: 'ask_gemini', params: { prompt, model, thinking, timeout_s: timeoutS }, clientId: RUNNER_CLIENT_ID }),
         signal: ctrl.signal,
       });
       if (!res.ok) throw new Error('bridge /call failed: HTTP ' + res.status);
@@ -679,9 +698,10 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   log('bridge v' + (bridgeVersion || '?') + ' (disk v' + (st.diskVersion || '?') + '), ' + extWord + ' connected — asking task ' + task.id);
 
   const askedModel = task.model || DEFAULT_MODEL;
+  const askedThinking = task.thinking || DEFAULT_THINKING;
   let answer;
   try {
-    answer = await bridge.ask({ prompt: task.prompt, model: askedModel, timeoutMs: task.timeout_ms || 180000 });
+    answer = await bridge.ask({ prompt: task.prompt, model: askedModel, thinking: askedThinking, timeoutMs: task.timeout_ms || 180000 });
   } catch (e) {
     if (e.code === 'busy' || /browser busy/.test(e.message || '')) {
       log('browser busy — leaving task ' + task.id + ' pending');
@@ -694,10 +714,10 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     // v0.3.4: the failed file carries the bridge task_id whenever one
     // exists, so the answer can still be retrieved later via get_answer
     // even when this run gave up (e.g. the 15-minute poll cap ran out).
-    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, failed_at: new Date().toISOString() };
+    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, failed_at: new Date().toISOString() };
     await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
     await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
-    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, askedThinking, adapterVersion, bridgeVersion, bridgeTaskId }), log);
     return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId };
   }
 
@@ -710,6 +730,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     model: 'gemini-web',
     elapsed_ms: answer.elapsedMs || null,
     asked_model: askedModel,
+    asked_thinking: askedThinking,
     answered_model: answer.model || null,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
@@ -718,8 +739,8 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   };
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
-  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
-  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId };
+  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId };
 }
 
 // ---------- run loop ----------
