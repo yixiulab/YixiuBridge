@@ -86,7 +86,7 @@ function taskJson(id, prompt, extra = {}) {
   return JSON.stringify({ id, prompt, created_by: 'muse', created_at: '2026-11-21T10:00:00.000Z', ...extra });
 }
 
-function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, failBridgeTaskId = null, bridgeTaskId = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1' } = {}) {
+function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, failBridgeTaskId = null, bridgeTaskId = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1', thinkingWarning = null } = {}) {
   const calls = [];
   return {
     calls,
@@ -100,7 +100,7 @@ function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = nu
         if (failBridgeTaskId) e.bridgeTaskId = failBridgeTaskId;
         throw e;
       }
-      return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion, bridgeTaskId };
+      return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion, bridgeTaskId, thinkingWarning };
     },
   };
 }
@@ -896,6 +896,17 @@ test('task with an explicit thinking level passes it through', async () => {
   assert.equal(res.status, 'done');
   assert.equal(bridge.calls.find((c) => c.op === 'ask').thinking, '低');
   assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').asked_thinking, '低');
+});
+
+test('a thinking warning from the bridge lands in the done file (v0.4.2)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({ thinkingWarning: 'gemini thinking level did not stick — picker still shows "Neon"' });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.match(readRepo(gh.files, 'tasks/done/t1.answer.json').thinking_warning, /did not stick/);
 });
 
 test('createBridgeCaller.ask sends thinking in the /call body', async () => {
