@@ -86,22 +86,44 @@ Info '没有找到令牌，跳过更新，只启动服务。想自动更新请�
 }
 
 # 3. 下载最新版并覆盖（-SkipUpdate 时跳过：新版脚本接管后不需要重复下载）。
+# v0.4.0：优先走在线更新（只拉改动文件、验完再换）；在线更新失败或
+# 模块不存在时再退回整包 ZIP 下载。$downloaded 为真时，下面的自我
+# 更新交接照常跑（新版脚本接管）；$zipDownloaded 只表示 ZIP 真下载了。
 $downloaded = $false
+$zipDownloaded = $false
 if ($token -and -not $SkipUpdate) {
+$onlineUpdater = Join-Path $InstallDir 'host\online-updater.mjs'
+$onlineCli = Join-Path $InstallDir 'scripts\online-update-cli.mjs'
+if (Test-Path $onlineUpdater -and Test-Path $onlineCli) {
+Step 3 '在线更新（只拉改动文件）...'
+try {
+& node "$onlineCli" --install-dir "$InstallDir"
+if ($LASTEXITCODE -eq 0) {
+$downloaded = $true
+Info '在线更新完成。'
+} else {
+Warn '在线更新失败，改用整包下载。'
+}
+} catch {
+Warn "在线更新失败（$($_.Exception.Message)），改用整包下载。"
+}
+}
+if (-not $downloaded) {
 Step 3 '下载最新版...'
 $zipPath = Join-Path $env:TEMP 'YixiuBridge-latest.zip'
 $extractDir = Join-Path $env:TEMP 'YixiuBridge-update'
 if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force}
 $headers = @{ Authorization = "token $token"}
-$downloaded = $true
+$zipDownloaded = $true
 try {
 Invoke-WebRequest -Uri "https://codeload.github.com/$REPO/zip/refs/heads/main" -Headers $headers -OutFile $zipPath -UseBasicParsing
 } catch {
 Write-Host "下载失败：$($_.Exception.Message)"
 Write-Host '只启动现有服务，不更新。网络恢复后可以再双击一次。'
-$downloaded = $false
+$zipDownloaded = $false
 }
-if ($downloaded) {
+if ($zipDownloaded) {
+$downloaded = $true
 Info '解压并覆盖安装目录...'
 Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
 $srcDir = Join-Path $extractDir 'YixiuBridge-main'
@@ -110,6 +132,7 @@ Get-ChildItem -Path $srcDir -Force | Copy-Item -Destination $InstallDir -Recurse
 Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
 Remove-Item $extractDir -Recurse -Force -ErrorAction SilentlyContinue
 Info '更新完成。'
+}
 }
 }
 
