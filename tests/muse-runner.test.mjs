@@ -399,7 +399,7 @@ test('createBridgeCaller polls after a bridge timeout that carries a task_id and
     if (url.includes('/tasks/task_late')) {
       taskCalls++;
       if (taskCalls < 2) return jsonResponse({ status: 'running' });
-      return jsonResponse({ status: 'done', answer: 'late pomodoro code', model: 'Neon', elapsedMs: 260000, adapterVersion: '0.3.5' });
+      return jsonResponse({ status: 'done', answer: 'late pomodoro code', model: 'Neon', elapsedMs: 260000, adapterVersion: '0.3.6' });
     }
     return jsonResponse({}, 404);
   };
@@ -407,7 +407,7 @@ test('createBridgeCaller polls after a bridge timeout that carries a task_id and
   const res = await bridge.ask({ prompt: 'slow one', model: 'Neon', timeoutMs: 30000 });
   assert.equal(res.answer, 'late pomodoro code');
   assert.equal(res.bridgeTaskId, 'task_late', 'the late answer carries the bridge task id');
-  assert.equal(res.adapterVersion, '0.3.5');
+  assert.equal(res.adapterVersion, '0.3.6');
   assert.ok(taskCalls >= 2);
 });
 
