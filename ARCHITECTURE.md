@@ -88,6 +88,14 @@ AI --tools/call--> MCP server --POST /call--> bridge --SSE tool_call--> 插件
 
 - **自我更新交接（v0.3.3 修 bug）**：下载完如果新版脚本变了，旧脚本比对哈希、改用新版脚本继续执行（`-SkipUpdate -Updated` 接管，不重复下载）。哈希必须拿**下载前**算好的那份比——直接跑安装目录里的脚本时，运行中的脚本和安装目录里的脚本是同一个文件，下载后再算哈希永远相等，交接永远跳过（2026-11-21 真机验证：下载了 0.3.2，却一直跑 0.3.1 的逻辑）。
 
+- **runner 更新后重启（v0.3.4 修）**：0.3.3 的 `-Updated` 开关在真机上失效了——17:17 那次双击实际跑的是下载前的 0.3.2 脚本（交接还没发生），它没有 `-Updated` 可传，新脚本就以 `$updateHappened = $false` 跑完，只打印“runner 已在运行，跳过。”，侧边栏一直显示旧版 `muse-runner/0.3.0`。v0.3.4 改用文件时间兜底：`host\muse-runner.mjs`、`kernel\shared\constants.js` 任一文件比 runner 进程启动时间晚，就判它跑的是旧版，空闲时重启。每次双击都会重新解压、文件时间刷新，所以即使没发新版也可能判“旧”而重启一次——无害（空闲时才重启，任务在跑时不动）。
+
+- **锁文件与心跳（v0.3.4，任务 -008）**：runner 死掉后锁文件 `muse-runner.lock` 留在原地，旧逻辑只看锁文件里的 PID 活不活——PID 被复用时还会误判“在运行”，新 runner 永远起不来，-008 八分钟没人接。v0.3.4 改成心跳证明活着：活着的 runner 每 30 秒刷新 `muse-runner.heartbeat`（`{pid, at}`）；锁 PID 死了直接接管；PID 活着但心跳超过 3 分钟没刷新（挂住、旧版没心跳、或 PID 被复用）也接管，并在日志里写明原因；只有心跳新鲜才拒绝启动。锁文件本身保持“第一行就是裸 PID”的格式不变（第 6 步的 PowerShell 靠 `^\d+$` 读它）。第 6 步同样只认进程：锁文件存在不算数，锁文件里的 PID 必须是活着的 node 进程才算“runner 在运行”。接管时不杀旧进程——停一个挂住的 runner 是更新脚本的事（它先核对进程名再停），短暂双 runner 时桥的控制者锁 + 幂等守卫会拦住重复提问。
+
+- **runner 日志写文件（v0.3.4）**：runner 是最小化启动的，死掉/卡住时没有任何窗口可看。`runRunner` 的每条日志现在同时追加到 `~/.yixiubridge/muse-runner.log`（1 MiB 时轮转成 `.log.1`），一键启动第 6 步结束时也会把这个路径打印出来。
+
+- **config.json 保护（v0.3.4，真机事故）**：2026-11-21 17:17 一键启动的第 7 步把本次选中的 Chrome 身份写进 `config.json` 当缓存时，把里面保存的 `github_token` 弄丢了——runner 一直在内存里用旧令牌所以没感觉，直到它死掉、重启时才报“no github_token”，-008 因此八分钟没人接。旧写法的两个毛病：(1) 读/解析失败就拿空对象覆盖原文件；(2) Windows PowerShell 5.1 的 `Set-Content -Encoding UTF8` 会带 BOM，Node 的 `JSON.parse` 读到 BOM 直接报错，令牌明明在文件里、runner 也认不出来。v0.3.4 四层防护：读不到/读到空/解析失败/解析后没有属性时直接放弃写，绝不覆盖已有文件；写之前先备份 `config.json.bak`；写临时文件再 `Move-Item` 原子改名；用 `UTF8Encoding($false)` 无 BOM 写 UTF-8；写完读回来核对原来有的顶层键（尤其 `github_token`）都在，少了就从备份恢复。`host/muse-runner.mjs` 的 `loadConfig` 也容忍开头的 BOM，`saveConfig` 改成临时文件 + 改名的原子写（它本来就是合并式写入，不会丢字段）。
+
 - 桥的 `/status` 返回 `disk_version`：每次调用都现读磁盘上的 `package.json`，不是启动时缓存的版本。
 - 插件 service worker 的 1 分钟 `yixiubridge-keepalive` alarm 每次也调 `checkForUpdate()`：取 `/status`，用 `kernel/shared/constants.js` 的 `compareSemver` 比较 `disk_version` 和 `chrome.runtime.getManifest().version`，磁盘更新、且不等于 `chrome.storage.local` 里记的 `yixiubridge.lastAutoReloadVersion` 时，记下版本再 `chrome.runtime.reload()`。正在跑任务时跳过检查，避免中途重载。
 - `extension/background/router.js` 的 `_pingContentScript` 会回报内容脚本的版本（`CONTENT_VERSION`）**和适配器版本**（`ADAPTER_VERSION`，内容脚本从适配器文件读）：两个版本缺失或不符就是 stale；脚本答了但不认识 ping（pre-0.3.0 的旧脚本）也是 stale；脚本根本不回答（插件重载后旧脚本已失效）同样触发。`_ensureGeminiTab` 遇到 stale 或无应答时重载一次 Gemini 标签页再继续，重载后还 stale/无应答就明确报错，绝不循环刷。Chrome 重载插件时不会重新注入旧标签页的内容脚本，这一步就是为它准备的——2026-11-21 的 -003 任务就是旧适配器在标签页里继续跑、报错却和 0.2.0 一字不差，才加了这层自检。
@@ -116,6 +124,7 @@ Muse（云端） --GET tasks/done/<id>.answer.json--> GitHub
 - 一次只做一个任务，最老的先做；格式坏的任务进 `tasks/failed/`，不卡住队列。
 - 桥没起、插件没连、浏览器正忙：任务留在原地等下一轮，不丢。
 - **幂等守卫（v0.3.3）**：runner 先写 `tasks/done/<id>.answer.json`（或失败写 `tasks/failed/`），再删 `tasks/pending/` 里的任务文件。两步之间如果 runner 被停掉（或桥重启），下一轮会看到同一个 pending 任务——守卫先查 done/failed 是否已存在，存在就只删 leftover pending 文件，**不再问 Gemini 第二遍**，已有的答案/失败文件原样不动。问之前先守卫，桥没起时也照样清理。
+- **长答案轮询（v0.3.4，任务 -007）**：-007 失败不是因为没发出去——用户截图证明问题已经发出、Gemini 也答完了整段番茄钟代码，只是生成时间超过了 runner 的 240 秒上限，runner 就写了失败文件，答案白白躺在标签页里。根因是桥自己的调用定时器（`timeout_s + 60`）超时时只报一句不带 task_id 的裸错，runner 拿不到 id 就没法找回答案。修复分三层：(1) 插件 router 在提问开始时就把 `{status: 'running'}` 的任务登记到桥的任务库（`/task-update`）；(2) 桥超时时如果已经知道 task_id，就按文档里的 pending 形状返回 `{status: 'pending', task_id}` 而不是裸错（`askTimeoutSlackS` 只给测试用，生产默认值不变）；(3) runner 拿到 pending + task_id 后不再写失败文件，而是每 15 秒轮询 `get_answer(task_id)`，从提问开始算最长等 15 分钟，答出来写 done、真报错写 failed、超时也写 failed——失败文件里永远带 `bridge_task_id`，事后还能手动找回答案。桥没起、没插件、浏览器正忙这类“还没开始”的失败不受影响，照旧留 pending 或写失败。
 - 单次 ask 超过 240 秒走桥的任务轮询（GET `/tasks/:id`），因为桥的一次调用上限是 300 秒。
 - 每天的用量记在 `tasks/log/YYYY-MM-DD.json`（id、状态、耗时、模型）。
 - runner 只认 `~/.yixiubridge/config.json` 里的 `github_token`；令牌只发给 api.github.com，永不打印。runner 是用户亲手启动的本地可信客户端（clientId `muse-runner/<版本>`），不走 MCP 配对窗口——它根本不是 MCP 客户端。
