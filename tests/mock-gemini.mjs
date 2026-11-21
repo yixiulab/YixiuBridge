@@ -217,3 +217,49 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     get stopBtn() { return stopBtn; },
   };
 }
+
+// The Gemini home screen, exactly as task -006 saw it (2026-11-21):
+// hero greeting + suggestion chips, NO send button (the visible arrow is
+// a plain div, not a <button>), NO model response yet. The hero text sits
+// in a `.markdown` container — the shape the 0.3.2 adapter mistook for an
+// answer. Built on createMockGeminiPage with sendKind 'icon-only'.
+// Options (on top of createMockGeminiPage's):
+//   homeHeroInsideConvo (default false): put the hero container inside the
+//     conversation element (worst case: scoping alone cannot exclude it,
+//     the hero filter must).
+//   sendOnEnter: Enter in the prompt box submits (starts streaming).
+//   enterClearsBox: Enter clears the box WITHOUT submitting (the
+//     box-cleared-without-submit edge: confirmSent passes, but no model
+//     text ever appears).
+//   enterRerendersHome: Enter replaces the hero container with a fresh
+//     element carrying slightly DIFFERENT home-screen text (the -006
+//     re-render trap: the response text "changed", which the old
+//     "text changed" heuristic read as proof the message was sent).
+// Returns the createMockGeminiPage shape, plus `hero`.
+export const HOME_SCREEN_TEXT = '需要我为你做些什么？\n考考我莎士比亚的知识\n规划一条附近 3 英里的平坦慢跑路线\n总结会议记录';
+const HOME_SCREEN_TEXT_RERENDERED = '需要我为你做些什么？\n考考我莎士比亚的知识\n规划一条附近 3 英里的平坦慢跑路线\n总结会议记录\n再想一个点子';
+export function createMockGeminiHomePage(opts = {}) {
+  const page = createMockGeminiPage({ sendKind: 'icon-only', ...opts });
+  const hero = new FakeElement('div', { class: 'home-greeting markdown' });
+  hero.textContent = HOME_SCREEN_TEXT;
+  const parent = opts.homeHeroInsideConvo ? page.convo : page.doc.body;
+  parent.appendChild(hero);
+  page.hero = hero;
+  if (opts.enterClearsBox) {
+    page.box.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') page.box.textContent = '';
+    });
+  }
+  if (opts.enterRerendersHome) {
+    page.box.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter') return;
+      const fresh = new FakeElement('div', { class: 'home-greeting markdown' });
+      fresh.textContent = HOME_SCREEN_TEXT_RERENDERED;
+      const p = page.hero.parent || page.doc.body;
+      page.hero.remove();
+      p.appendChild(fresh);
+      page.hero = fresh;
+    });
+  }
+  return page;
+}
