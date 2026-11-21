@@ -87,11 +87,13 @@ test('read_page on a Chrome internal page does not attach anything', async () =>
 
 function makeGeminiRouter({ sendMessageImpl }) {
   const tab = { id: 7, title: 'Gemini', url: 'https://gemini.google.com/app', active: true, status: 'complete' };
+  const reloads = [];
   const fakeChrome = {
     tabs: {
       query: async () => [tab],
       get: async () => tab,
       create: async () => tab,
+      reload: async (tabId) => { reloads.push(tabId); },
       sendMessage: (tabId, msg) => sendMessageImpl(tabId, msg),
     },
   };
@@ -102,6 +104,7 @@ function makeGeminiRouter({ sendMessageImpl }) {
     profile: { id: 'Profile-test', label: 'test' },
     version: '0.2.0-test',
   });
+  router._testReloads = reloads;
   return router;
 }
 
@@ -115,7 +118,7 @@ test('list_models reaches the Gemini content script and returns its result', asy
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
       seen.push(msg);
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
       if (msg.tool === 'list_models') return { ok: true, result: modelsResult };
       throw new Error('unexpected tool ' + msg.tool);
     },
@@ -129,7 +132,7 @@ test('list_models reaches the Gemini content script and returns its result', asy
 test('list_models reports a clear error when the content script fails', async () => {
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
       if (msg.tool === 'list_models') return { ok: false, error: 'gemini model picker button not found' };
       throw new Error('unexpected tool ' + msg.tool);
     },
@@ -144,7 +147,7 @@ test('ask_gemini passes model and thinking through to the content script', async
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
       seen.push(msg);
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
       if (msg.tool === 'ask_gemini') {
         // Simulate the content script finishing immediately.
         setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10 }), 5);
@@ -161,4 +164,42 @@ test('ask_gemini passes model and thinking through to the content script', async
   assert.equal(askMsg.params.model, 'Neon');
   assert.equal(askMsg.params.thinking, '高');
   assert.equal(askMsg.params.prompt, 'hello');
+});
+
+test('stale content script (pre-update, no version) reloads the tab once, then proceeds', async () => {
+  let pings = 0;
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') {
+        pings++;
+        // First ping: the tab still runs the content script from before the
+        // extension was updated (no version field — Chrome does not
+        // re-inject content scripts on extension reload). After the tab
+        // reload it reports the current version.
+        if (pings === 1) return { ok: true, page: 'gemini' };
+        return { ok: true, page: 'gemini', version: '0.2.0-test' };
+      }
+      if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [] } };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.current, 'Neon');
+  assert.equal(pings, 2, 'ping must be retried after the reload');
+  assert.deepEqual(router._testReloads, [7], 'tab must be reloaded exactly once');
+});
+
+test('content script still stale after a tab reload fails with a clear error', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.1.0' };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /still an old version/);
+  assert.match(res.error, /0\.2\.0-test/);
+  assert.deepEqual(router._testReloads, [7], 'tab is reloaded once before giving up');
 });
