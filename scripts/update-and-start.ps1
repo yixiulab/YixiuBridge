@@ -188,20 +188,41 @@ Warn '桥已启动但 /status 还没响应，稍等片刻再看。'
 # 则接管锁文件。pending 里的任务不会丢（没写完 done/failed 前 pending
 # 文件还在，新 runner 会接着做；done/failed 已写好时 runner 的幂等守
 # 卫会跳过重复提问——见 host/muse-runner.mjs）。
+# “更新过”的判断（v0.3.4 修）：只看 $downloaded / -Updated 不够——
+# 0.3.2 及更早的启动脚本交接时根本不传 -Updated（这个开关是 0.3.3
+# 才加的），所以从旧版升上来时 $updateHappened 永远是假的（2026-11-21
+# 真机：0.3.2 交接后 0.3.3 脚本打印“runner 已在运行，跳过”，runner
+# 一直跑 0.3.0）。改用文件时间兜底：runner 代码文件
+# （host\muse-runner.mjs、kernel\shared\constants.js）比 runner 进程
+# 启动得晚，说明代码在它启动后被更新过，跑的是旧版。每次双击都会重新
+# 解压、文件时间会刷新，所以即使没发新版也可能判为“旧”而重启一次—
+# —无害（空闲时才重启，任务在跑时不动），重启本身只要一秒。
 Step 6 '启动 runner...'
 $lockPath = Join-Path $env:USERPROFILE '.yixiubridge\muse-runner.lock'
 $updateHappened = $downloaded -or $Updated
 $runnerRunning = $false
+$runnerProc = $null
 $lockPid = $null
 if (Test-Path $lockPath) {
 $lockPid = (Get-Content $lockPath -Raw -ErrorAction SilentlyContinue).Trim()
 if ($lockPid -and [regex]::IsMatch($lockPid, '^\d+$')) {
-$p = Get-Process -Id ([int]$lockPid) -ErrorAction SilentlyContinue
-if ($p) { $runnerRunning = $true}
+$runnerProc = Get-Process -Id ([int]$lockPid) -ErrorAction SilentlyContinue
+# 锁文件里的 PID 可能已被别的进程复用：只有 node 进程才当它是 runner。
+if ($runnerProc -and $runnerProc.ProcessName -eq 'node') { $runnerRunning = $true }
+else { $runnerProc = $null }
+}
+}
+$runnerStale = $updateHappened
+if ($runnerRunning -and -not $runnerStale -and $runnerProc -and $runnerProc.StartTime) {
+foreach ($codeFile in @('host\muse-runner.mjs', 'kernel\shared\constants.js')) {
+$codePath = Join-Path $InstallDir $codeFile
+if (Test-Path $codePath) {
+if ((Get-Item $codePath).LastWriteTime -gt $runnerProc.StartTime) { $runnerStale = $true; break }
+}
 }
 }
 if ($runnerRunning) {
-if (-not $updateHappened) {
+if (-not $runnerStale) {
 Info 'runner 已在运行，跳过。'
 $runnerStarted = $true
 } else {
@@ -254,6 +275,9 @@ Start-Process -FilePath 'node' -ArgumentList 'bin/yixiubridge.mjs','runner' -Wor
 $runnerStarted = $true
 Info 'runner 已启动（最小化窗口）。'
 }
+# runner 的日志同时写进文件（v0.3.4）：窗口是最小化的，死掉/卡住时看不
+# 到输出，日志文件是唯一的诊断入口。每次都打印路径。
+Info "runner 日志：$env:USERPROFILE\.yixiubridge\muse-runner.log"
 
 # 7. 打开装了插件的 Chrome 身份到 Gemini。绝不无条件打开默认 Chrome：
 # 用户有多个 Chrome 身份，Gemini 和插件只在其中一个上。先按扩展 ID
@@ -497,13 +521,43 @@ if ($chosen) {
     }
   }
   # 把本次选择记到 config.json 里当下次平局的参考；写失败也不影响主流程。
+  # 安全铁律（v0.3.4，2026-11-21 真机事故：旧写法把 config.json 里保存
+  # 的 github_token 弄丢了——runner 重启后报“no github_token”、任务 8
+  # 分钟没人接；另：Windows PowerShell 5.1 的 Set-Content -Encoding
+  # UTF8 会带 BOM，Node 的 JSON.parse 读到 BOM 会直接报错，同样会让
+  # runner 认不出里面的 github_token，所以这里必须无 BOM 写 UTF-8）：
+  # (1) 读不到、读到空、解析失败或解析后没有属性时，绝不写，直接放弃，
+  # 绝不拿空对象覆盖已有文件；(2) 写之前先备份 config.json.bak；
+  # (3) 写临时文件再改名（原子写），写一半崩了也不会截断原文件；
+  # (4) 写完读回来核对：原来有的顶层键（尤其 github_token）必须都还
+  # 在，少了就从备份恢复。
   try {
     $cfgObj = $null
-    if (Test-Path $configPath) { $cfgObj = Get-Content $configPath -Raw -ErrorAction Stop | ConvertFrom-Json }
-    if (-not $cfgObj) { $cfgObj = New-Object PSObject }
+    $origKeys = @()
+    if (Test-Path $configPath) {
+      $rawCfg = Get-Content $configPath -Raw -ErrorAction Stop
+      if (-not $rawCfg -or -not $rawCfg.Trim()) { throw 'config.json 为空，放弃写入缓存（原文件不动）。' }
+      $cfgObj = $rawCfg | ConvertFrom-Json -ErrorAction Stop
+      if (-not $cfgObj -or @($cfgObj.PSObject.Properties).Count -eq 0) { throw 'config.json 解析后没有属性，放弃写入缓存（原文件不动）。' }
+      $origKeys = @($cfgObj.PSObject.Properties.Name)
+      Copy-Item $configPath "$configPath.bak" -Force -ErrorAction Stop
+    } else {
+      $cfgObj = New-Object PSObject
+    }
     $cfgObj | Add-Member -NotePropertyName 'last_chrome_profile' -NotePropertyValue $chosen.ProfileDir -Force
-    $cfgObj | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding UTF8
-  } catch { }
+    $tmpCfg = "$configPath.tmp"
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpCfg, ($cfgObj | ConvertTo-Json -Depth 10), $utf8NoBom)
+    Move-Item $tmpCfg $configPath -Force -ErrorAction Stop
+    $checkObj = Get-Content $configPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    $missingKeys = @($origKeys | Where-Object { $checkObj.PSObject.Properties.Name -notcontains $_ })
+    if ($missingKeys.Count -gt 0) {
+      if (Test-Path "$configPath.bak") { Copy-Item "$configPath.bak" $configPath -Force }
+      Warn "写入缓存后核对发现缺失键（$($missingKeys -join ', ')），已从备份恢复，本次不写缓存。"
+    }
+  } catch {
+    Warn "本次选择没能记入 config.json（$($_.Exception.Message)），不影响使用。"
+  }
   if (-not $chosen.Exe -or -not (Test-Path $chosen.Exe)) {
     Warn '选中的身份没有可用的 chrome.exe 路径（内部错误），本次不打开浏览器。桥和 runner 已正常启动。'
     $chromeSkipped = '选中的身份缺少 chrome.exe 路径'
