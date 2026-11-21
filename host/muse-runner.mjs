@@ -6,6 +6,11 @@
 // Appends one entry per task to the daily quota log
 // tasks/log/YYYY-MM-DD.json.
 //
+// Version self-check (v0.3.1): before every ask it logs the bridge
+// version (bridge /status) and after the ask the adapter version that
+// answered; a mismatch is flagged in the log in plain language, and both
+// versions are stored in the done/failed file and the quota log.
+//
 // The GitHub token is read ONLY from ~/.yixiubridge/config.json field
 // `github_token` (set once with `node bin/yixiubridge.mjs github-token`).
 // It is never printed, never written to the repo, and is sent only to
@@ -116,17 +121,38 @@ export function logFilePath(date) {
   return 'tasks/log/' + y + '-' + m + '-' + day + '.json';
 }
 
-export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, answeredModel = null }) {
+export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, answeredModel = null, adapterVersion = null, bridgeVersion = null }) {
   return {
     id: task.id,
     status, // 'done' | 'failed'
     prompt: task.prompt.length > 200 ? task.prompt.slice(0, 200) + '…' : task.prompt,
     asked_model: askedModel,
     answered_model: answeredModel,
+    adapter_version: adapterVersion,
+    bridge_version: bridgeVersion,
     elapsed_ms: elapsedMs,
     error: error || null,
     at: new Date().toISOString(),
   };
+}
+
+// The adapter version travels inside error strings as "[adapter_version:
+// 0.3.1]" (the bridge error channel is plain text — see router
+// _askGemini). Pull it back out for the failed file and the log, so a
+// stale-adapter failure is diagnosed without guessing. Returns null when
+// the error carries no version tag.
+export function adapterVersionFromError(msg) {
+  const m = /\[adapter_version:\s*([0-9A-Za-z.+-]+)\]/.exec(String(msg || ''));
+  return m ? m[1] : null;
+}
+
+// Warn loudly when the adapter that answered is not the version the bridge
+// is running: the Gemini tab is stale (opened before an extension update).
+// Both null/unknown = nothing to compare — stay silent.
+function logVersionMismatch(log, bridgeVersion, adapterVersion) {
+  if (!bridgeVersion || !adapterVersion || bridgeVersion === adapterVersion) return;
+  log('⚠ 版本不一致: bridge v' + bridgeVersion + '，但 Gemini 适配器 v' + adapterVersion
+    + ' — 标签页里的适配器是旧的。请双击 一键启动.bat 更新（或关闭 Gemini 标签页重开一个）后再试。');
 }
 
 // ---------- GitHub API client (token only from local config) ----------
@@ -206,11 +232,19 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
   async function status() {
     try {
       const res = await fetchImpl(bridgeUrl + '/status');
-      if (!res.ok) return { up: false, extensions: 0 };
+      if (!res.ok) return { up: false, extensions: 0, version: null, diskVersion: null };
       const st = await res.json();
-      return { up: !!st.ok, extensions: Array.isArray(st.extensions) ? st.extensions.length : 0 };
+      // version = the bridge server's code version; diskVersion = the
+      // version on disk (fresh from package.json). In a healthy setup
+      // both equal the release version — and the adapter version too.
+      return {
+        up: !!st.ok,
+        extensions: Array.isArray(st.extensions) ? st.extensions.length : 0,
+        version: st.version || null,
+        diskVersion: st.disk_version || null,
+      };
     } catch (e) {
-      return { up: false, extensions: 0 };
+      return { up: false, extensions: 0, version: null, diskVersion: null };
     }
   }
 
@@ -227,9 +261,17 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null };
       }
-      if (t.status === 'failed') throw new Error(t.error || 'Gemini answer failed');
+      if (t.status === 'failed') {
+        // Keep the version tag in the message (it lands in the failed
+        // file) and as a property (processOneTask reads it directly).
+        const msg = (t.error || 'Gemini answer failed')
+          + (t.adapterVersion ? ' [adapter_version: ' + t.adapterVersion + ']' : '');
+        const e = new Error(msg);
+        e.adapterVersion = t.adapterVersion || null;
+        throw e;
+      }
       // 'running' or 'unknown' — keep polling.
     }
     throw new Error('ask_gemini task ' + taskId + ' did not finish in time');
@@ -256,11 +298,14 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     if (!out.ok) {
       const e = new Error(out.error || 'bridge call failed');
       if (/browser busy/.test(out.error || '')) e.code = 'busy';
+      // The router embeds "[adapter_version: X]" in its error strings;
+      // pull it out so the failed file and the log carry it as a field.
+      e.adapterVersion = adapterVersionFromError(out.error);
       throw e;
     }
     const r = out.result || {};
     if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, timeoutS);
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null };
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
@@ -343,6 +388,14 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
     return { status: 'no-extension', id: task.id };
   }
 
+  // Version self-check (v0.3.1): log the bridge version before every ask.
+  // The adapter version comes back with the answer; a mismatch between
+  // the two means the Gemini tab is still running an old adapter — the
+  // log says so plainly instead of failing with a stale-looking error.
+  const bridgeVersion = st.version || null;
+  const extWord = st.extensions === 1 ? '1 extension' : st.extensions + ' extensions';
+  log('bridge v' + (bridgeVersion || '?') + ' (disk v' + (st.diskVersion || '?') + '), ' + extWord + ' connected — asking task ' + task.id);
+
   const askedModel = task.model || DEFAULT_MODEL;
   let answer;
   try {
@@ -353,13 +406,17 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
       return { status: 'busy', id: task.id };
     }
     const errMsg = e.message || String(e);
-    const failedDoc = { id: task.id, error: errMsg, failed_at: new Date().toISOString() };
+    const adapterVersion = e.adapterVersion || adapterVersionFromError(errMsg);
+    logVersionMismatch(log, bridgeVersion, adapterVersion);
+    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, failed_at: new Date().toISOString() };
     await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
     await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
-    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel }), log);
-    return { status: 'failed', id: task.id, error: errMsg };
+    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, adapterVersion, bridgeVersion }), log);
+    return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion };
   }
 
+  const adapterVersion = answer.adapterVersion || null;
+  logVersionMismatch(log, bridgeVersion, adapterVersion);
   const doneDoc = {
     id: task.id,
     answer: answer.answer,
@@ -367,12 +424,14 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
     elapsed_ms: answer.elapsedMs || null,
     asked_model: askedModel,
     answered_model: answer.model || null,
+    adapter_version: adapterVersion,
+    bridge_version: bridgeVersion,
     answered_at: new Date().toISOString(),
   };
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
-  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null }), log);
-  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null };
+  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion }), log);
+  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion };
 }
 
 // ---------- run loop ----------
@@ -427,6 +486,7 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
       else if (res.status === 'done' || res.status === 'failed') {
         logLine('task ' + res.id + ': ' + res.status
           + (res.elapsedMs ? ' (' + res.elapsedMs + 'ms)' : '')
+          + (res.adapterVersion ? ' — adapter v' + res.adapterVersion : '')
           + (res.error ? ' — ' + res.error : ''));
       }
       // bridge-down / no-extension / busy: already logged inside processOneTask.
