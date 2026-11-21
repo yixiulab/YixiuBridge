@@ -295,7 +295,15 @@ Info "runner 日志：$env:USERPROFILE\.yixiubridge\muse-runner.log"
 #     0.3.2 改查 Preferences 是错方向）。
 # 匹配时还从 Secure Preferences（没有就从 Preferences）里读出扩展的加
 # 载路径（extensions.settings.<ID>.path）打印出来——能确认 Chrome 实际
-# 加载的是不是更新脚本维护的那个文件夹。
+# 加载的是不是更新脚本维护的那个文件夹。路径只来自该 ID 自己的记录，
+# 找不到就打印“未知”，绝不拿隔壁扩展的路径顶替（v0.3.5：旧正则兜底
+# 会跨过记录边界，0.3.4 真机给 Profile 18 打印了内置
+# network_speech_synthesis 的路径）。
+# v0.3.5 匹配的“已确认”规则：只在文本里含有扩展 ID 不算“已确认”——
+# Chrome 还在 protection/macs 里给每个扩展留完整性哈希（ID 作键），
+# 记录删了哈希还会留着，子串搜索会把已卸载的身份也算成匹配（2026-11-21
+# 真机：0.3.4 扫出 2 个匹配，错选 Profile 18）。已确认的才优先选；一
+# 个已确认的都没有时，才退回未确认的，并在输出里明说。
 # 破案（v0.3.3，2026-11-21 17:10）：0.3.1 扫 72 个身份 0 匹配的原因
 # 找到了——根本不是文件或证据问题，是扩展 ID 写错了：之前全仓库用的
 # alcjfcjfkfhfacgofhgoenljfenbcgcel 是 33 个字符（多了一个 f，11:36
@@ -318,10 +326,12 @@ Step 7 '定位装了插件的 Chrome 身份...'
 # 的 Secure Preferences / Local Extension Settings / Preferences 定位身份目录名；(2) 只开那一个，绝不影响正在运
 # 行的别的浏览器——不杀 chrome.exe、不关任何窗口，用 --profile-directory
 # 只开匹配身份，已在运行就把标签页交给已有实例；(3) 多个身份都装了插件
-# 时优先选已有进程在运行的那个，都没在运行就选 Preferences 最近修改的
-# 那个，选了哪个、为什么都写出来；上次选中的身份目录存在 config.json
-# 里（last_chrome_profile），只做平局参考，每次都重新扫描、以新结果为
-# 准；(4) 定位不到就不开任何浏览器，只完成上面的更新和启动。
+# 时：先在已确认的匹配里选——优先选已有进程在运行的那个，再优先选
+# 加载的扩展正是本机维护那一份的（加载路径与安装目录一致），再选
+# Preferences 最近修改的那个，选了哪个、为什么都写出来；上次选中的
+# 身份目录存在 config.json 里（last_chrome_profile），只做平局参考，
+# 每次都重新扫描、以新结果为准；(4) 定位不到就不开任何浏览器，只完成
+# 上面的更新和启动。
 
 # 按 chrome.exe 路径推断它用的 User Data 目录（正式版/Beta/Canary）。
 function Get-UserDataDirForChrome($exePath) {
@@ -386,22 +396,91 @@ function Read-TextFileShared($path) {
 # 从偏好设置格式的文本里取扩展的加载路径（extensions.settings.<ID>.path，
 # 解压扩展 location 4 才有）。调用方先传 Secure Preferences 文本（主
 # 证据，Chrome 的记录在这里），没有再传 Preferences 文本；两种文件
-# 的 schema 相同。只在文本里含有扩展 ID 时才解析 JSON；解析失败退回
-# 正则在 ID 附近找 "path"。取不到返回 $null，绝不报错——路径只是诊断
-# 信息，没有它也不影响匹配。
+# 的 schema 相同。
+# v0.3.5 血的教训：旧的正则兜底（ID 后 5000 字符内找第一个 "path"）没有
+# 入口边界，ID 自身的记录里没有 path（或文件解析失败）时，会跨过记录边
+# 界抓到隔壁扩展的路径——2026-11-21 真机：给 Profile 18 打印了 Chrome
+# 内置 network_speech_synthesis 的路径
+# （.../resources/network_speech_synthesis/mv3）。现在的规则：路径只
+# 能来自该 ID 自己那条 extensions.settings 记录（JSON 按 ID 取键，或
+# 正则只在该记录自己的花括号里找）；找不到就返回 $null（调用方打印
+# “未知”），绝不拿别的扩展的路径顶替。
+function Get-PrefsSettingsObject($prefsText) {
+  # 解析一次，供“确认匹配”和“取路径”两处共用。解析失败返回 $null。
+  if (-not $prefsText) { return $null }
+  try {
+    $prefsJson = $prefsText | ConvertFrom-Json -ErrorAction Stop
+    $settings = $prefsJson.extensions.settings
+    if ($settings) { return $settings }
+  } catch { }
+  return $null
+}
+
+function Test-SettingsHasId($settingsObj) {
+  # 已确认：扩展 ID 是 extensions.settings 的一个键（一条活的安装记录）。
+  if (-not $settingsObj) { return $false }
+  return ($settingsObj.PSObject.Properties.Name -contains $EXTENSION_ID)
+}
+
+function Get-ExtensionPathFromSettings($settingsObj) {
+  if (-not (Test-SettingsHasId $settingsObj)) { return $null }
+  $entry = $settingsObj.PSObject.Properties[$EXTENSION_ID].Value
+  if ($entry -and $entry.path) { return [string]$entry.path }
+  return $null
+}
+
+# 正则兜底（仅当文件解析失败时用）：找到 "<ID>" 后紧跟 ':' 和 '{' 的
+# 那一次出现（MAC 记录里 ID 后面跟的是哈希字符串，没有 '{'，不会误
+# 判），再数字符配对的花括号，只在那条记录内部找 "path"。找不到、
+# 花括号不配对、记录里没有 path，都返回 $null。
+function Get-ExtensionPathFromEntryRegex($prefsText) {
+  if (-not $prefsText) { return $null }
+  $needle = '"' + $EXTENSION_ID + '"'
+  $from = 0
+  while ($true) {
+    $idIdx = $prefsText.IndexOf($needle, $from, [System.StringComparison]::Ordinal)
+    if ($idIdx -lt 0) { return $null }
+    $j = $idIdx + $needle.Length
+    while ($j -lt $prefsText.Length -and [char]::IsWhiteSpace($prefsText[$j])) { $j++ }
+    if ($j -ge $prefsText.Length -or $prefsText[$j] -ne ':') { $from = $idIdx + $needle.Length; continue }
+    $j++
+    while ($j -lt $prefsText.Length -and [char]::IsWhiteSpace($prefsText[$j])) { $j++ }
+    if ($j -ge $prefsText.Length -or $prefsText[$j] -ne '{') { $from = $idIdx + $needle.Length; continue }
+    # 从 $j 的 '{' 开始数字符配对（字符串与转义要跳过）。
+    $depth = 0
+    $inStr = $false
+    $esc = $false
+    $end = -1
+    for ($i = $j; $i -lt $prefsText.Length; $i++) {
+      $ch = $prefsText[$i]
+      if ($inStr) {
+        if ($esc) { $esc = $false }
+        elseif ($ch -eq '\') { $esc = $true }
+        elseif ($ch -eq '"') { $inStr = $false }
+      } else {
+        if ($ch -eq '"') { $inStr = $true }
+        elseif ($ch -eq '{') { $depth++ }
+        elseif ($ch -eq '}') { $depth--; if ($depth -eq 0) { $end = $i + 1; break } }
+      }
+    }
+    if ($end -lt 0) { return $null }
+    $entryText = $prefsText.Substring($j, $end - $j)
+    $m = [regex]::Match($entryText, '"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    if (-not $m.Success) { return $null }
+    return ($m.Groups[1].Value -replace '\\\\', '\' -replace '\\"', '"')
+  }
+}
+
 function Get-ExtensionPathFromPrefs($prefsText) {
   if (-not $prefsText) { return $null }
   if (-not $prefsText.Contains($EXTENSION_ID)) { return $null }
-  try {
-    $prefsJson = $prefsText | ConvertFrom-Json -ErrorAction Stop
-    $entry = $prefsJson.extensions.settings.$EXTENSION_ID
-    if ($entry -and $entry.path) { return [string]$entry.path }
-  } catch { }
-  try {
-    $m = [regex]::Match($prefsText, [regex]::Escape($EXTENSION_ID) + '"\s*:\s*\{[\s\S]{0,5000}?"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
-    if ($m.Success) { return ($m.Groups[1].Value -replace '\\\\', '\') }
-  } catch { }
-  return $null
+  $settingsObj = Get-PrefsSettingsObject $prefsText
+  if ($settingsObj) {
+    # 解析成功就是权威结论：settings 对象就是全部真相——该 ID 没记录
+    # 或记录里没 path，就是没有，绝不拿隔壁的顶替。
+    return (Get-ExtensionPathFromSettings $settingsObj)
+  }
+  return (Get-ExtensionPathFromEntryRegex $prefsText)
 }
 
 # 扫描各身份，找含有扩展 ID 的身份。证据有三条（任一成立即算匹配，
@@ -445,66 +524,158 @@ foreach ($inst in $installs) {
       $unreadableProfiles += "$($d.Name)（$($inst.UserData)）"
       continue
     }
+    # 已确认（confirmed）：扩展 ID 是 extensions.settings 的一个键
+    # （一条活的安装记录），或该身份有 Local Extension Settings\<ID>
+    # 目录（扩展在那跑过）。未确认（unconfirmed）：ID 只在文本里出现
+    # （例如 protection/macs 里的完整性哈希，记录删了哈希还会留着），
+    # 没有安装记录——算匹配，但选身份时排在已确认的后面。
+    # v0.3.5：只在文本含 ID 时才解析 JSON（72 个身份都解析太慢）；解
+    # 析结果两处共用（确认匹配 + 取路径）。
+    $secureSettings = $null
+    $secureConfirmed = $false
+    $secureTextHasId = $false
+    if ($secureReadable) {
+      $secureTextHasId = $secureText.Contains($EXTENSION_ID)
+      if ($secureTextHasId) {
+        $secureSettings = Get-PrefsSettingsObject $secureText
+        $secureConfirmed = Test-SettingsHasId $secureSettings
+      }
+    }
+    $prefsSettings = $null
+    $prefsConfirmed = $false
+    $prefsTextHasId = $false
+    if ($prefsReadable) {
+      $prefsTextHasId = $prefsText.Contains($EXTENSION_ID)
+      if ($prefsTextHasId) {
+        $prefsSettings = Get-PrefsSettingsObject $prefsText
+        $prefsConfirmed = Test-SettingsHasId $prefsSettings
+      }
+    }
     $hasId = $false
+    $confirmed = $false
     $evidence = @()
     $loadedPath = $null
-    if ($secureReadable -and $secureText.Contains($EXTENSION_ID)) {
-      $hasId = $true; $evidence += 'Secure Preferences'
-      $loadedPath = Get-ExtensionPathFromPrefs $secureText
+    if ($secureConfirmed) {
+      $hasId = $true; $confirmed = $true; $evidence += 'Secure Preferences'
+      $loadedPath = Get-ExtensionPathFromSettings $secureSettings
+    } elseif ($secureTextHasId) {
+      $hasId = $true; $evidence += 'Secure Preferences (unconfirmed)'
     }
-    if ($lesExists) { $hasId = $true; $evidence += 'Local Extension Settings' }
-    if ($prefsReadable -and $prefsText.Contains($EXTENSION_ID)) {
-      $hasId = $true; $evidence += 'Preferences'
-      if (-not $loadedPath) { $loadedPath = Get-ExtensionPathFromPrefs $prefsText }
+    if ($lesExists) { $hasId = $true; $confirmed = $true; $evidence += 'Local Extension Settings' }
+    if ($prefsConfirmed) {
+      $hasId = $true; $confirmed = $true; $evidence += 'Preferences'
+      if (-not $loadedPath) { $loadedPath = Get-ExtensionPathFromSettings $prefsSettings }
+    } elseif ($prefsTextHasId) {
+      $hasId = $true; $evidence += 'Preferences (unconfirmed)'
     }
     if (-not $hasId) { continue }
     $prefFile = Join-Path $d.FullName 'Preferences'
     $mtime = $null
     if (Test-Path $prefFile) { $mtime = (Get-Item $prefFile).LastWriteTime }
     elseif (Test-Path $securePath) { $mtime = (Get-Item $securePath).LastWriteTime }
-    $foundProfiles += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime; Evidence = ($evidence -join '+'); LoadedPath = $loadedPath }
+    $foundProfiles += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime; Evidence = ($evidence -join '+'); LoadedPath = $loadedPath; Confirmed = $confirmed }
   }
 }
-Info "共扫描 $scannedUserDataDirs 个 User Data 目录、$scannedProfiles 个 Chrome 身份（其中 $readablePrefsProfiles 个的 Preferences 可读、$readableSecureProfiles 个的 Secure Preferences 可读），其中 $($foundProfiles.Count) 个装了 YixiuBridge。"
+$confirmedCount = @($foundProfiles | Where-Object { $_.Confirmed }).Count
+Info "共扫描 $scannedUserDataDirs 个 User Data 目录、$scannedProfiles 个 Chrome 身份（其中 $readablePrefsProfiles 个的 Preferences 可读、$readableSecureProfiles 个的 Secure Preferences 可读），其中 $($foundProfiles.Count) 个装了 YixiuBridge（其中 $confirmedCount 个是已确认的安装记录）。"
 if ($unreadableProfiles.Count -gt 0) {
   Warn '以下身份的 Preferences 和 Secure Preferences 都读不到、也没有 Local Extension Settings 目录，本次没用它们做判断：'
   foreach ($u in $unreadableProfiles) { Info "  $u" }
 }
 
-# 选择：(a) 优先选已有 chrome.exe 进程在运行的那个匹配身份；
-# (b) 都没在运行就选 Preferences 最近修改的那个；
-# (c) 修改时间相同（或都没有）时，参考上次选中的身份。
+# 某个 chrome.exe 命令行是否指向该身份目录。浏览器进程只有在最初就
+# 是用 --profile-directory 启动时才带这个标记；已在运行的 Chrome 里
+# 再开一个身份窗口（交接/身份切换）时，没有任何进程带这个标记，所以
+# 这里找不到 ≠ 该身份没在运行——找不到时只退回后面的规则，绝不当成
+# “没在运行”的证据（v0.3.5：旧的精确匹配
+# '--profile-directory="Profile 21"' 在真机上从来没命中过，0.3.3 也
+# 是靠“Preferences 最近修改过”蒙对 Profile 21 的）。
+# 写法上容忍：--profile-directory 后面跟 '=' 或空格、引号可有可无；
+# 也认完整路径里的身份目录段（--user-data-dir=...\Profile 21）。
+# 目录名后必须跟引号/空白/斜杠或行尾，'Profile 2' 绝不会误 match
+# 'Profile 21'。绝不用 -match（见上面血的教训）。
+function Test-ProfileRunning($commandLines, $profileDir) {
+  if (-not $profileDir) { return $false }
+  $esc = [regex]::Escape($profileDir)
+  $flagPat = '--profile-directory\s*=?\s*"' + $esc + '(?=["\s]|$)'
+  $pathPat = '[\\/]' + $esc + '(?=[\\/"\s]|$)'
+  foreach ($cl in $commandLines) {
+    if (-not $cl) { continue }
+    if ([regex]::IsMatch($cl, $flagPat, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) { return $true }
+    if ([regex]::IsMatch($cl, $pathPat, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) { return $true }
+  }
+  return $false
+}
+
+# 桥上当前连着几个扩展（只作诊断参考：桥认扩展靠的是每个身份随机生成
+# 的别名，脚本没法把别名对应回身份目录名，所以这里只打印个数，不用来
+# 选身份；个数和扫描结果对不上时，输出里能看出来）。
+$bridgeExtCount = $null
+try {
+  $st7 = Invoke-RestMethod -Uri "http://127.0.0.1:$BRIDGE_PORT/status" -TimeoutSec 5
+  if ($null -ne $st7.extensions) { $bridgeExtCount = @($st7.extensions).Count }
+} catch { $bridgeExtCount = $null }
+if ($null -ne $bridgeExtCount) {
+  Info "桥上当前连着 $bridgeExtCount 个扩展。"
+  if ($bridgeExtCount -eq 1 -and $foundProfiles.Count -gt 1) {
+    Info '（桥上只有一个扩展在线，而扫描到多个匹配身份——其中可能有已卸载留下的旧记录，下面会优先选已确认的身份。）'
+  }
+}
+
+# 选择（v0.3.5 改顺序，见 kernel/shared/chrome-discovery.js 同款实现）：
+# (a) 已确认的匹配里，优先选已有 chrome.exe 进程在运行的那个；
+# (b) 再优先选加载的扩展正是本机维护的那一份的（加载路径与安装目录
+#     一致——0.3.4 真机：Profile 18 赢在“Preferences 最近修改过”，
+#     但它加载的根本不是我们维护的那份）；
+# (c) 再选已确认的匹配里 Preferences 最近修改的那个；
+# (d) 修改时间相同（或都没有）时，参考上次选中的身份。
+# 一个已确认的都没有时，才退回未确认的匹配（并在输出里明说）。
 # 注意：只在已确认装了插件的身份里选；一个都没找到就什么都不开，
 # 绝不退而求其次去开一个没装插件的身份。
 $chosen = $null
 $chosenRunning = $false
+$chosenConfirmed = $true
 $why = ''
 if ($foundProfiles.Count -gt 0) {
-  $running = @()
+  $confirmedPool = @($foundProfiles | Where-Object { $_.Confirmed })
+  $pool = $confirmedPool
+  $poolConfirmed = $true
+  if ($confirmedPool.Count -eq 0) {
+    $pool = $foundProfiles
+    $poolConfirmed = $false
+  }
+  $chosenConfirmed = $poolConfirmed
+  $installExtDir = Join-Path $InstallDir 'extension'
+  $chromeCmdlines = @()
   try {
     $chromeProcs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction Stop
-    foreach ($m in $foundProfiles) {
-      $wantFlag = '--profile-directory="' + $m.ProfileDir + '"'
-      foreach ($pr in $chromeProcs) {
-        if ($pr.CommandLine -and $pr.CommandLine.Contains($wantFlag)) { $running += $m; break }
-      }
-    }
-  } catch { $running = @() }
+    foreach ($pr in $chromeProcs) { if ($pr.CommandLine) { $chromeCmdlines += [string]$pr.CommandLine } }
+  } catch { $chromeCmdlines = @() }
+  $running = @()
+  foreach ($m in $pool) {
+    if (Test-ProfileRunning $chromeCmdlines $m.ProfileDir) { $running += $m }
+  }
   if ($running.Count -gt 0) {
     $chosen = $running[0]
     $chosenRunning = $true
     $why = '该身份的 Chrome 已在运行'
     if ($running.Count -gt 1) { $why += '（多个匹配身份都在运行，取第一个）' }
   } else {
-    $sorted = $foundProfiles | Sort-Object { if ($_.Modified) { $_.Modified } else { [datetime]::MinValue } } -Descending
-    $chosen = $sorted[0]
-    $why = '该身份的 Preferences 最近修改过'
-    if ($sorted.Count -gt 1 -and $sorted[0].Modified -eq $sorted[1].Modified) {
-      $cached = $null
-      try { $cached = (Get-Content $configPath -Raw -ErrorAction Stop | ConvertFrom-Json).last_chrome_profile } catch { }
-      if ($cached) {
-        $hit = @($sorted | Where-Object { $_.ProfileDir -eq $cached })
-        if ($hit.Count -gt 0) { $chosen = $hit[0]; $why = '多个身份的修改时间相同，参考上次的选择' }
+    $ours = @($pool | Where-Object { $_.LoadedPath -and ($_.LoadedPath.TrimEnd('\') -ieq $installExtDir.TrimEnd('\')) })
+    if ($ours.Count -gt 0) {
+      $chosen = @($ours | Sort-Object { if ($_.Modified) { $_.Modified } else { [datetime]::MinValue } } -Descending)[0]
+      $why = '该身份加载的扩展正是本机维护的那一份（路径与安装目录一致）'
+    } else {
+      $sorted = @($pool | Sort-Object { if ($_.Modified) { $_.Modified } else { [datetime]::MinValue } } -Descending)
+      $chosen = $sorted[0]
+      $why = '该身份的 Preferences 最近修改过'
+      if ($sorted.Count -gt 1 -and $sorted[0].Modified -eq $sorted[1].Modified) {
+        $cached = $null
+        try { $cached = (Get-Content $configPath -Raw -ErrorAction Stop | ConvertFrom-Json).last_chrome_profile } catch { }
+        if ($cached) {
+          $hit = @($sorted | Where-Object { $_.ProfileDir -eq $cached })
+          if ($hit.Count -gt 0) { $chosen = $hit[0]; $why = '多个身份的修改时间相同，参考上次的选择' }
+        }
       }
     }
   }
@@ -514,11 +685,16 @@ $chromeOpened = $false
 $chromeSkipped = ''
 if ($chosen) {
   Info "选中 Chrome 身份：$($chosen.ProfileDir)（$why；证据：$($chosen.Evidence)）"
+  if (-not $chosenConfirmed) {
+    Warn '该身份只是“未确认”匹配（扩展 ID 只在文本里出现，没有扩展安装记录——可能是已卸载留下的旧记录）。如果打开后插件不在，请把这次输出发回来看。'
+  }
   if ($chosen.LoadedPath) {
     Info "  扩展加载路径：$($chosen.LoadedPath)"
-    if ($chosen.LoadedPath -ne (Join-Path $InstallDir 'extension')) {
+    if ($chosen.LoadedPath.TrimEnd('\') -ine (Join-Path $InstallDir 'extension').TrimEnd('\')) {
       Warn "该路径和一键更新维护的安装目录（$InstallDir\extension）不一样：Chrome 加载的插件可能不是更新脚本下载的那一份，更新后插件不会自动变新。请确认 chrome://extensions 里加载的是哪个文件夹。"
     }
+  } else {
+    Info '  扩展加载路径：未知（该身份的记录里没有加载路径）。'
   }
   # 把本次选择记到 config.json 里当下次平局的参考；写失败也不影响主流程。
   # 安全铁律（v0.3.4，2026-11-21 真机事故：旧写法把 config.json 里保存
