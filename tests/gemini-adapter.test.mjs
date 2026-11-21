@@ -85,8 +85,11 @@ test('isStreaming reflects the stop button, getLatestResponseText returns the ne
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   assert.equal(adapter.isStreaming(), false);
   const p = adapter.ask('hello');
-  // Let the click land and streaming start.
-  await new Promise((r) => setTimeout(r, 30));
+  // Let the click land and streaming start. 20ms, not 30ms: the mock
+  // removes the stop button at ~30ms (2 chunks x 10ms + the final step),
+  // so checking at 30ms races the removal and flakes. At 20ms streaming
+  // is definitely still up.
+  await new Promise((r) => setTimeout(r, 20));
   assert.equal(adapter.isStreaming(), true);
   const res = await p;
   assert.equal(res.ok, true);
