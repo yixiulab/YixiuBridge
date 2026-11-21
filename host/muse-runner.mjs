@@ -215,6 +215,17 @@ export function createGitHubClient({ token, fetchImpl = fetch, repo = REPO } = {
       const f = await api('GET', '/repos/' + repo + '/contents/' + path);
       return { sha: f.sha, content: Buffer.from(f.content || '', 'base64').toString('utf8') };
     },
+    // True when the file exists (404 = false; any other failure throws).
+    // Used by the idempotency guard in processOneTask.
+    async exists(path) {
+      try {
+        await api('GET', '/repos/' + repo + '/contents/' + path);
+        return true;
+      } catch (e) {
+        if (e.status === 404) return false;
+        throw e;
+      }
+    },
     async putFile(path, content, message, sha) {
       const body = { message, content: Buffer.from(content, 'utf8').toString('base64'), branch: 'main' };
       if (sha) body.sha = sha;
@@ -378,6 +389,24 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
   }
 
   const task = first.task;
+
+  // Idempotency guard (v0.3.3): the runner writes the done/failed file
+  // FIRST and deletes the pending file AFTER. If it is stopped (or the
+  // bridge restarts) in between, the next poll sees the same pending task
+  // again — and would ask Gemini the same question a second time. A task
+  // whose done/failed file already exists is resolved: drop the leftover
+  // pending file and do NOT ask again. Never loses a task (the
+  // answer/error file is already there) and never duplicates an ask.
+  // Checked BEFORE the bridge status, so a leftover is cleared even while
+  // the bridge is down.
+  for (const resolvedPath of [paths.done, paths.failed]) {
+    if (await github.exists(resolvedPath)) {
+      log('task ' + task.id + ' already resolved (' + resolvedPath + ') — removing the leftover pending file, not asking again');
+      await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove already-resolved task ' + task.id);
+      return { status: 'already-resolved', id: task.id };
+    }
+  }
+
   const st = await bridge.status();
   if (!st.up) {
     log('bridge is down — leaving task ' + task.id + ' pending');
@@ -483,7 +512,7 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
     try {
       const res = await processOneTask({ github, bridge, log: logLine });
       if (res.status === 'empty') logLine('poll: no pending tasks');
-      else if (res.status === 'done' || res.status === 'failed') {
+      else if (res.status === 'done' || res.status === 'failed' || res.status === 'already-resolved') {
         logLine('task ' + res.id + ': ' + res.status
           + (res.elapsedMs ? ' (' + res.elapsedMs + 'ms)' : '')
           + (res.adapterVersion ? ' — adapter v' + res.adapterVersion : '')
