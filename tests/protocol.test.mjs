@@ -258,6 +258,15 @@ test('ping and tabs_context round-trip through bridge and simulated extension', 
   rpc.child.kill();
 });
 
+test('/status reports the version on disk (disk_version, read fresh from package.json)', async () => {
+  const res = await fetch(bridgeUrl + '/status');
+  assert.equal(res.status, 200);
+  const st = await res.json();
+  assert.equal(st.ok, true);
+  assert.equal(st.version, '0.3.0');
+  assert.equal(st.disk_version, '0.3.0');
+});
+
 test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adapter -> mock page)', async () => {
   const rpc = spawnMcp();
   await rpc.call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'TestClient', version: '1.0' } });
