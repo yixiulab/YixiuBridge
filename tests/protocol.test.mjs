@@ -263,8 +263,8 @@ test('/status reports the version on disk (disk_version, read fresh from package
   assert.equal(res.status, 200);
   const st = await res.json();
   assert.equal(st.ok, true);
-  assert.equal(st.version, '0.3.3');
-  assert.equal(st.disk_version, '0.3.3');
+  assert.equal(st.version, '0.3.4');
+  assert.equal(st.disk_version, '0.3.4');
 });
 
 test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adapter -> mock page)', async () => {
@@ -354,4 +354,110 @@ test('unknown tool is rejected with -32602', async () => {
     /-32602/
   );
   rpc.child.kill();
+});
+
+// ---------- bridge timeout hands the caller a task_id (v0.3.4) ----------
+// Background: task -007 — the bridge timer fired at 240s with a bare
+// error and no task_id, so the runner wrote a failed file while the
+// answer was sitting in the tab. The router now registers the task id
+// with the bridge as soon as the ask starts; a bridge-side timeout must
+// return {status:'pending', task_id} for polling instead of an error.
+// These tests use a separate bridge with askTimeoutSlackS: 0 so the
+// timer runs in ~1s (production slack is 60s) and a raw SSE client that
+// registers a task but never answers the call.
+
+async function connectSilentExtension(baseUrl, onToolCall) {
+  const abort = new AbortController();
+  const res = await fetch(baseUrl + '/events?profile=Profile-silent&label=silent', { signal: abort.signal });
+  if (!res.ok) throw new Error('SSE connect failed: ' + res.status);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const pump = async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const data = raw.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trim()).join('');
+        if (!data) continue;
+        let frame;
+        try { frame = JSON.parse(data); } catch (e) { continue; }
+        if (frame.type === 'tool_call') onToolCall(frame).catch(() => {});
+      }
+    }
+  };
+  pump().catch(() => { /* aborted on disconnect */ });
+  return { disconnect() { abort.abort(); } };
+}
+
+test('bridge timeout returns pending + task_id when the extension registered the task', async () => {
+  const dir2 = await mkdtemp(join(tmpdir(), 'yixiubridge-test-timeout-'));
+  const b2 = await createBridgeServer({ port: 0, dataDir: dir2, repoRoot: ROOT, askTimeoutSlackS: 0 });
+  const url2 = 'http://127.0.0.1:' + b2.port;
+  try {
+    const ext2 = await connectSilentExtension(url2, async (frame) => {
+      // Register the task at ask start (what the real router does) and
+      // then stay silent — never POST /result, so the bridge timer fires.
+      await fetch(url2 + '/task-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: 'task_reg_1', task: { status: 'running', startedAt: Date.now() } }),
+      });
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    const started = Date.now();
+    const res = await fetch(url2 + '/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'ask_gemini', params: { prompt: 'slow one', timeout_s: 1 }, clientId: 'test-timeout' }),
+    });
+    const out = await res.json();
+    const tookMs = Date.now() - started;
+    assert.ok(tookMs < 10000, 'bridge timeout should fire in ~1s with slack 0, took ' + tookMs + 'ms');
+    assert.equal(out.ok, true, 'timeout with a known task resolves pending, not an error: ' + JSON.stringify(out));
+    assert.equal(out.result.status, 'pending');
+    assert.equal(out.result.task_id, 'task_reg_1');
+    // The registered task is pollable right away.
+    const g1 = await (await fetch(url2 + '/tasks/task_reg_1')).json();
+    assert.equal(g1.status, 'running');
+    // When the answer eventually finishes, get_answer returns it.
+    await fetch(url2 + '/task-update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId: 'task_reg_1', task: { status: 'done', answer: 'late answer', model: 'gemini-web' } }),
+    });
+    const g2 = await (await fetch(url2 + '/tasks/task_reg_1')).json();
+    assert.equal(g2.status, 'done');
+    assert.equal(g2.answer, 'late answer');
+    ext2.disconnect();
+  } finally {
+    await b2.close();
+  }
+});
+
+test('bridge timeout without a registered task still returns the plain error', async () => {
+  const dir3 = await mkdtemp(join(tmpdir(), 'yixiubridge-test-timeout2-'));
+  const b3 = await createBridgeServer({ port: 0, dataDir: dir3, repoRoot: ROOT, askTimeoutSlackS: 0 });
+  const url3 = 'http://127.0.0.1:' + b3.port;
+  try {
+    // Silent extension: never registers a task, never answers.
+    const ext3 = await connectSilentExtension(url3, async () => {});
+    await new Promise((r) => setTimeout(r, 200));
+    const res = await fetch(url3 + '/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tool: 'ask_gemini', params: { prompt: 'x', timeout_s: 1 }, clientId: 'test-timeout' }),
+    });
+    const out = await res.json();
+    assert.equal(out.ok, false);
+    assert.match(out.error, /timed out after 1s/);
+    assert.equal(out.task_id, undefined, 'no task was registered, so no id to hand back');
+    ext3.disconnect();
+  } finally {
+    await b3.close();
+  }
 });
