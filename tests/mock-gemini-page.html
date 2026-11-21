@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gemini — mock page (YixiuBridge test fixture)</title>
+<!--
+  Static mock of the Gemini web DOM shape, for HUMAN reference and for future
+  live-adapter checks. The automated tests use tests/mock-gemini.mjs (a fake
+  DOM with the same shape) — this file is not executed by `npm test`.
+
+  Shape the adapter expects:
+    * prompt box: div[contenteditable][aria-label*="Ask Gemini"]
+    * send button: button[aria-label="Send message"]
+    * while streaming: button[aria-label="Stop generating"] present
+    * answer: .model-response-text (newest last)
+  Clicking Send starts a fake stream that appends chunks, then removes the
+  stop button — the adapter's completion signal.
+-->
+<style>
+  body { font-family: sans-serif; max-width: 640px; margin: 40px auto; }
+  [contenteditable] { border: 1px solid #ccc; border-radius: 12px; padding: 12px; min-height: 48px; }
+  button { border-radius: 999px; padding: 8px 18px; margin-top: 8px; }
+  .model-response-text { margin-top: 16px; padding: 12px; background: #f6f7f9; border-radius: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <h1>Gemini (mock)</h1>
+  <div data-test-id="conversation"></div>
+  <div contenteditable="true" aria-label="Ask Gemini" id="prompt-box"></div>
+  <button aria-label="Send message" id="send">Send</button>
+  <script>
+    (function () {
+      var send = document.getElementById('send');
+      send.addEventListener('click', function () {
+        var convo = document.querySelector('[data-test-id="conversation"]');
+        var resp = document.createElement('div');
+        resp.className = 'model-response-text';
+        convo.appendChild(resp);
+        var stop = document.createElement('button');
+        stop.setAttribute('aria-label', 'Stop generating');
+        stop.textContent = 'Stop';
+        document.body.appendChild(stop);
+        var chunks = ['4', ' is ', 'the answer.'];
+        var i = 0;
+        (function step() {
+          if (i < chunks.length) { resp.textContent += chunks[i]; i++; setTimeout(step, 300); }
+          else stop.remove();
+        })();
+      });
+    })();
+  </script>
+</body>
+</html>
