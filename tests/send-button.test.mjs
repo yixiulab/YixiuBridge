@@ -121,6 +121,47 @@ test('not-found error on a page with no buttons at all says so', async () => {
   assert.match(res.error, /No buttons found in the page at all/);
 });
 
+// --- Enter fallback (v0.3.2) ---
+// Ground truth from task -005 (2026-11-21): the adapter was confirmed
+// running ([adapter_version: 0.3.1]) yet every layer missed and the
+// 26-button dump had no send control — the visible blue arrow is NOT a
+// <button>. When no button is found, ask() now presses Enter on the
+// prompt box first; only when Enter also fails does it report "not found".
+
+test('no send button: Enter on the prompt box sends and the answer comes back', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, sendOnEnter: true });
+  page.send.remove();
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  assert.equal(adapter.findSendButton(page.box).el, null, 'no button must be found after removing it');
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, true, 'Enter must carry the question when the arrow is not a <button>');
+  assert.equal(res.answer, '4 is the answer.');
+});
+
+test('no send button and Enter fails: error names the fallback and carries adapter_version', async () => {
+  const page = createMockGeminiPage();
+  page.send.remove();
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 1000 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /send button not found/);
+  assert.match(res.error, /Enter fallback also did not send/);
+  assert.equal(res.adapter_version, Adapter.ADAPTER_VERSION, 'the failure must carry the version stamp');
+});
+
+test('not-found error includes the send-arrow icon ancestor chain', async () => {
+  const page = createMockGeminiPage({ sendKind: 'icon-only' });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 1000 });
+  assert.equal(adapter.findSendButton(page.box).el, null, 'a bare icon in a div is not a button');
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /send button not found/);
+  assert.match(res.error, /Send-arrow icon ancestors: /);
+  assert.match(res.error, /mat-icon icon="arrow_upward"/, 'the chain starts at the icon itself');
+  assert.match(res.error, /div\.send-wrap/, 'then the plain div that carries it');
+  assert.match(res.error, /div\.app/, 'then the app container');
+});
+
 test('ask with a model closes a menu left open by the selection and still sends', async () => {
   const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, keepMenuOpenOnSelect: true });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
