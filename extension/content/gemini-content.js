@@ -1,0 +1,81 @@
+// YixiuBridge — Gemini web content script (runs in the page's isolated world).
+// Listens for tool messages from the service worker, runs the Gemini adapter
+// against the real document, and posts the result back with a separate
+// runtime message (no long-lived message channel — the answer can take
+// minutes). It never talks to the bridge directly and never contacts any
+// remote host.
+//
+// The adapter file (kernel/adapters/gemini-web.js) is loaded before this
+// script via manifest content_scripts, so YixiuBridgeGeminiAdapter is global.
+(function () {
+  'use strict';
+
+  var adapter = null;
+
+  function getAdapter() {
+    if (adapter) return adapter;
+    var factory = (typeof window !== 'undefined' && window.YixiuBridgeGeminiAdapter)
+      ? window.YixiuBridgeGeminiAdapter
+      : (typeof YixiuBridgeGeminiAdapter !== 'undefined' ? YixiuBridgeGeminiAdapter : null);
+    if (!factory || !factory.createAdapter) return null;
+    adapter = factory.createAdapter(document, { win: window });
+    return adapter;
+  }
+
+  function pageSnapshot() {
+    var text = (document.body && document.body.innerText) || '';
+    return {
+      title: document.title || '',
+      url: location.href,
+      textExcerpt: text.slice(0, 4000),
+      textLength: text.length,
+    };
+  }
+
+  chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
+    if (!msg || msg.from !== 'yixiubridge-sw') return false;
+
+    if (msg.tool === 'ping') {
+      sendResponse({ ok: true, page: 'gemini', url: location.href });
+      return false;
+    }
+
+    if (msg.tool === 'read_page') {
+      sendResponse({ ok: true, snapshot: pageSnapshot() });
+      return false;
+    }
+
+    if (msg.tool === 'ask_gemini') {
+      // Start the ask in the background; report back via a separate message
+      // so the original channel is not held open for minutes.
+      var taskId = msg.taskId || ('task_' + Date.now().toString(36));
+      var ad = getAdapter();
+      if (!ad) {
+        chrome.runtime.sendMessage({
+          from: 'yixiubridge-gemini', type: 'ask_result', taskId: taskId,
+          result: { ok: false, error: 'gemini adapter not loaded in this page — extension files may be out of sync' },
+        });
+        sendResponse({ ok: true, started: true, taskId: taskId });
+        return false;
+      }
+      var prompt = (msg.params && msg.params.prompt) || '';
+      var timeoutMs = ((msg.params && msg.params.timeout_s) || 180) * 1000;
+      ad.ask(prompt, { timeoutMs: timeoutMs }).then(function (res) {
+        chrome.runtime.sendMessage({ from: 'yixiubridge-gemini', type: 'ask_result', taskId: taskId, result: res });
+      }).catch(function (e) {
+        chrome.runtime.sendMessage({
+          from: 'yixiubridge-gemini', type: 'ask_result', taskId: taskId,
+          result: { ok: false, error: 'gemini content script error: ' + (e && e.message ? e.message : String(e)) },
+        });
+      });
+      sendResponse({ ok: true, started: true, taskId: taskId });
+      return false;
+    }
+
+    sendResponse({ ok: false, error: 'unknown tool for gemini content script: ' + msg.tool });
+    return false;
+  });
+
+  // Debug handle (page context only, no data leaves the browser).
+  window.__YixiuBridge = { version: '0.1.0', page: 'gemini' };
+})();
