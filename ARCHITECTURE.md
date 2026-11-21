@@ -84,7 +84,8 @@ AI --tools/call--> MCP server --POST /call--> bridge --SSE tool_call--> 插件
 
 - 桥的 `/status` 返回 `disk_version`：每次调用都现读磁盘上的 `package.json`，不是启动时缓存的版本。
 - 插件 service worker 的 1 分钟 `yixiubridge-keepalive` alarm 每次也调 `checkForUpdate()`：取 `/status`，用 `kernel/shared/constants.js` 的 `compareSemver` 比较 `disk_version` 和 `chrome.runtime.getManifest().version`，磁盘更新、且不等于 `chrome.storage.local` 里记的 `yixiubridge.lastAutoReloadVersion` 时，记下版本再 `chrome.runtime.reload()`。正在跑任务时跳过检查，避免中途重载。
-- `extension/background/router.js` 的 `_pingContentScript` 会回报内容脚本的版本（`CONTENT_VERSION`）：版本缺失或不符就是 stale，`_ensureGeminiTab` 会重载一次 Gemini 标签页再继续；重载后还 stale 就明确报错。Chrome 重载插件时不会重新注入旧标签页的内容脚本，这一步就是为它准备的。
+- `extension/background/router.js` 的 `_pingContentScript` 会回报内容脚本的版本（`CONTENT_VERSION`）**和适配器版本**（`ADAPTER_VERSION`，内容脚本从适配器文件读）：两个版本缺失或不符就是 stale；脚本答了但不认识 ping（pre-0.3.0 的旧脚本）也是 stale；脚本根本不回答（插件重载后旧脚本已失效）同样触发。`_ensureGeminiTab` 遇到 stale 或无应答时重载一次 Gemini 标签页再继续，重载后还 stale/无应答就明确报错，绝不循环刷。Chrome 重载插件时不会重新注入旧标签页的内容脚本，这一步就是为它准备的——2026-11-21 的 -003 任务就是旧适配器在标签页里继续跑、报错却和 0.2.0 一字不差，才加了这层自检。
+- **版本自检（v0.3.1）**：适配器的每次 `ask` / `listModels` 返回和报错都带 `adapter_version`（`kernel/adapters/gemini-web.js` 的 `ADAPTER_VERSION`，和发布版本号一致，测试里会核对五处版本一致）；router 把它存进任务对象，`ask_gemini` 失败时以 `[adapter_version: X]` 的形式写进报错字符串（桥的报错通道是纯文本，版本号只能这样带过去）；runner 在每次提问前记桥的版本（`/status` 的 `version` + `disk_version`），答完把 `adapter_version` 写进完成/失败文件和每日日志，两者不一致时在日志里打一行 `⚠ 版本不一致` 并提示双击一键启动更新或重开标签页。
 
 ## 多 Chrome 身份定位（v0.3，`scripts/update-and-start.ps1` 步骤 7）
 
