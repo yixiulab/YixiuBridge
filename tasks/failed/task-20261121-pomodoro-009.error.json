@@ -1,0 +1,8 @@
+{
+  "id": "task-20261121-pomodoro-009",
+  "error": "gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: 0.3.5] [adapter_version: 0.3.5]",
+  "adapter_version": "0.3.5",
+  "bridge_version": "0.3.5",
+  "bridge_task_id": "task_mwqrjsma0oxcj9",
+  "failed_at": "2026-11-21T18:54:19.629Z"
+}
