@@ -7,11 +7,15 @@
 # codeload.github.com，绝不打印。
 # 多 Chrome 身份：只动装了 YixiuBridge 扩展的那一个身份，绝不写死路径。
 # 每次运行时动态发现：先找 chrome.exe（注册表 App Paths、Get-Command、
-# 标准路径，正式版/Beta/Canary 都查），再扫各身份的 Secure Preferences
-# 按扩展 ID 定位身份目录名。多个身份都装了插件时，优先选已有进程在运行
-# 的那个；都没在运行就选 Preferences 最近修改的那个；上次选中的身份只
-# 存 config.json 当平局参考，每次都重新扫描、以新结果为准。定位不到就
-# 不打开任何浏览器，只更新代码和服务。绝不杀 chrome.exe、不关任何窗口。
+# 标准路径，正式版/Beta/Canary 都查），再扫各身份的 Preferences
+# （解压扩展的记录只在这里：extensions.settings.<扩展 ID>，location 4
+# + path 字段；Secure Preferences 里没有解压扩展的记录——2026-11-21
+# 真机验证：Profile 21 的 Secure Preferences 里搜不到扩展 ID）和
+# Secure Preferences、Local Extension Settings，按扩展 ID 定位身份
+# 目录名。多个身份都装了插件时，优先选已有进程在运行的那个；都没在
+# 运行就选 Preferences 最近修改的那个；上次选中的身份只存 config.json
+# 当平局参考，每次都重新扫描、以新结果为准。定位不到就不打开任何浏览
+# 器，只更新代码和服务。绝不杀 chrome.exe、不关任何窗口。
 param(
 [string]$InstallDir = "",
 [switch]$SkipUpdate
@@ -172,9 +176,21 @@ Info 'runner 已启动（最小化窗口）。'
 
 # 7. 打开装了插件的 Chrome 身份到 Gemini。绝不无条件打开默认 Chrome：
 # 用户有多个 Chrome 身份，Gemini 和插件只在其中一个上。先按扩展 ID
-# 扫描各身份的 Secure Preferences 定位身份目录名，再用
+# 扫描各身份的 Preferences、Secure Preferences 定位身份目录名，再用
 # --profile-directory 只开那一个身份；已在运行就不重复开。
 # 定位不到就不开任何浏览器，只完成上面的更新和启动。
+# 证据有三条（任一成立即算该身份装了插件）：
+# (1) Preferences 文本里含有扩展 ID——解压扩展的主证据：Chrome 把
+#     解压扩展记在 extensions.settings.<ID>（location 4 + path 字段），
+#     Secure Preferences 里没有它（2026-11-21 真机验证：Profile 21 的
+#     Secure Preferences 里搜不到扩展 ID，0.3.1 扫 72 个身份 0 匹配
+#     就是这个原因）；
+# (2) Secure Preferences 文本里含有扩展 ID（商店安装的扩展走这里）；
+# (3) 该身份下有 "Local Extension Settings\<扩展 ID>" 目录（扩展用
+#     过本地存储就会有）。
+# 匹配时还从 Preferences 里读出扩展的加载路径（extensions.settings.
+# <ID>.path）打印出来——能确认 Chrome 实际加载的是不是更新脚本维护
+# 的那个文件夹。
 # 血的教训（v0.3.1 的 bug）：绝不能用 $matches 存扫描结果！$matches
 # 是 PowerShell 自动变量，-match / -notmatch 会把它改写成匹配记录
 # （hashtable），后面选出来的就是个没有 ProfileDir/Exe 的空对象
@@ -184,7 +200,7 @@ Info 'runner 已启动（最小化窗口）。'
 Step 7 '定位装了插件的 Chrome 身份...'
 # 硬要求：(1) 绝不写死路径——每次动态发现 chrome.exe（注册表 App Paths、
 # Get-Command、标准路径：正式版/Beta/Canary 都查），再按扩展 ID 扫各身份
-# 的 Secure Preferences 定位身份目录名；(2) 只开那一个，绝不影响正在运
+# 的 Preferences / Secure Preferences 定位身份目录名；(2) 只开那一个，绝不影响正在运
 # 行的别的浏览器——不杀 chrome.exe、不关任何窗口，用 --profile-directory
 # 只开匹配身份，已在运行就把标签页交给已有实例；(3) 多个身份都装了插件
 # 时优先选已有进程在运行的那个，都没在运行就选 Preferences 最近修改的
@@ -252,48 +268,84 @@ function Read-TextFileShared($path) {
   }
 }
 
-# 扫描各身份，找含有扩展 ID 的身份。证据有两条（任一成立即算匹配）：
-# (1) Secure Preferences 文本里含有扩展 ID；(2) 该身份下有
-# "Local Extension Settings\<扩展 ID>" 目录（扩展用过本地存储就会有）。
-# 读不到文件的身份记下来并告警，绝不静默跳过。
+# 从 Preferences 文本里取扩展的加载路径（extensions.settings.<ID>.path，
+# 解压扩展 location 4 才有）。只在文本里含有扩展 ID 时才解析 JSON；
+# 解析失败退回正则在 ID 附近找 "path"。取不到返回 $null，绝不报错——
+# 路径只是诊断信息，没有它也不影响匹配。
+function Get-ExtensionPathFromPrefs($prefsText) {
+  if (-not $prefsText) { return $null }
+  if (-not $prefsText.Contains($EXTENSION_ID)) { return $null }
+  try {
+    $prefsJson = $prefsText | ConvertFrom-Json -ErrorAction Stop
+    $entry = $prefsJson.extensions.settings.$EXTENSION_ID
+    if ($entry -and $entry.path) { return [string]$entry.path }
+  } catch { }
+  try {
+    $m = [regex]::Match($prefsText, [regex]::Escape($EXTENSION_ID) + '"\s*:\s*\{[\s\S]{0,5000}?"path"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    if ($m.Success) { return ($m.Groups[1].Value -replace '\\\\', '\') }
+  } catch { }
+  return $null
+}
+
+# 扫描各身份，找含有扩展 ID 的身份。证据有三条（任一成立即算匹配）：
+# (1) Preferences 文本里含有扩展 ID；(2) Secure Preferences 文本里
+# 含有扩展 ID；(3) 该身份下有 "Local Extension Settings\<扩展 ID>"
+# 目录（扩展用过本地存储就会有）。
+# 两个文件都读不到、又没有 Local Extension Settings 目录的身份记下来
+# 并告警，绝不静默跳过。
 # 变量名绝不能叫 $matches（见上面血的教训）。
 $foundProfiles = @()
 $scannedProfiles = 0
+$scannedUserDataDirs = 0
+$readablePrefsProfiles = 0
 $unreadableProfiles = @()
 foreach ($inst in $installs) {
   if (-not (Test-Path $inst.UserData)) { continue }
+  $scannedUserDataDirs++
   $profileDirs = Get-ChildItem -Path $inst.UserData -Directory -ErrorAction SilentlyContinue |
     Where-Object { $_.Name -eq 'Default' -or [regex]::IsMatch($_.Name, '^Profile \d+$') }
   foreach ($d in $profileDirs) {
     $scannedProfiles++
-    $prefsPath = Join-Path $d.FullName 'Secure Preferences'
+    $prefsPath = Join-Path $d.FullName 'Preferences'
     $prefsText = $null
     $prefsReadable = $false
     if (Test-Path $prefsPath) {
       $prefsText = Read-TextFileShared $prefsPath
-      if ($null -ne $prefsText) { $prefsReadable = $true }
+      if ($null -ne $prefsText) { $prefsReadable = $true; $readablePrefsProfiles++ }
+    }
+    $securePath = Join-Path $d.FullName 'Secure Preferences'
+    $secureText = $null
+    $secureReadable = $false
+    if (Test-Path $securePath) {
+      $secureText = Read-TextFileShared $securePath
+      if ($null -ne $secureText) { $secureReadable = $true }
     }
     $lesDir = Join-Path $d.FullName "Local Extension Settings\$EXTENSION_ID"
     $lesExists = Test-Path $lesDir
-    if (-not $prefsReadable -and -not $lesExists) {
+    if (-not $prefsReadable -and -not $secureReadable -and -not $lesExists) {
       $unreadableProfiles += "$($d.Name)（$($inst.UserData)）"
       continue
     }
     $hasId = $false
     $evidence = @()
-    if ($prefsReadable -and $prefsText.Contains($EXTENSION_ID)) { $hasId = $true; $evidence += 'Secure Preferences' }
+    $loadedPath = $null
+    if ($prefsReadable -and $prefsText.Contains($EXTENSION_ID)) {
+      $hasId = $true; $evidence += 'Preferences'
+      $loadedPath = Get-ExtensionPathFromPrefs $prefsText
+    }
+    if ($secureReadable -and $secureText.Contains($EXTENSION_ID)) { $hasId = $true; $evidence += 'Secure Preferences' }
     if ($lesExists) { $hasId = $true; $evidence += 'Local Extension Settings' }
     if (-not $hasId) { continue }
     $prefFile = Join-Path $d.FullName 'Preferences'
     $mtime = $null
     if (Test-Path $prefFile) { $mtime = (Get-Item $prefFile).LastWriteTime }
-    elseif (Test-Path $prefsPath) { $mtime = (Get-Item $prefsPath).LastWriteTime }
-    $foundProfiles += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime; Evidence = ($evidence -join '+') }
+    elseif (Test-Path $securePath) { $mtime = (Get-Item $securePath).LastWriteTime }
+    $foundProfiles += @{ Exe = $inst.Exe; ProfileDir = $d.Name; UserData = $inst.UserData; Modified = $mtime; Evidence = ($evidence -join '+'); LoadedPath = $loadedPath }
   }
 }
-Info "共扫描 $scannedProfiles 个 Chrome 身份，其中 $($foundProfiles.Count) 个装了 YixiuBridge。"
+Info "共扫描 $scannedUserDataDirs 个 User Data 目录、$scannedProfiles 个 Chrome 身份（其中 $readablePrefsProfiles 个的 Preferences 可读），其中 $($foundProfiles.Count) 个装了 YixiuBridge。"
 if ($unreadableProfiles.Count -gt 0) {
-  Warn '以下身份的 Secure Preferences 读不到（可能正被 Chrome 占用），本次没用它们做判断：'
+  Warn '以下身份的 Preferences 和 Secure Preferences 都读不到、也没有 Local Extension Settings 目录，本次没用它们做判断：'
   foreach ($u in $unreadableProfiles) { Info "  $u" }
 }
 
@@ -340,6 +392,12 @@ $chromeOpened = $false
 $chromeSkipped = ''
 if ($chosen) {
   Info "选中 Chrome 身份：$($chosen.ProfileDir)（$why；证据：$($chosen.Evidence)）"
+  if ($chosen.LoadedPath) {
+    Info "  扩展加载路径：$($chosen.LoadedPath)"
+    if ($chosen.LoadedPath -ne (Join-Path $InstallDir 'extension')) {
+      Warn "该路径和一键更新维护的安装目录（$InstallDir\extension）不一样：Chrome 加载的插件可能不是更新脚本下载的那一份，更新后插件不会自动变新。请确认 chrome://extensions 里加载的是哪个文件夹。"
+    }
+  }
   # 把本次选择记到 config.json 里当下次平局的参考；写失败也不影响主流程。
   try {
     $cfgObj = $null
@@ -360,7 +418,7 @@ if ($chosen) {
     $chromeOpened = $true
   }
 } else {
-  Warn '没能定位到装了 YixiuBridge 的 Chrome 身份（没有哪个身份的 Secure Preferences 里含有该扩展，或相关文件读不到），本次不打开任何浏览器。'
+  Warn "没能定位到装了 YixiuBridge 的 Chrome 身份（已扫 $scannedUserDataDirs 个 User Data 目录、$scannedProfiles 个身份，其中 $readablePrefsProfiles 个的 Preferences 可读；没有哪个身份的 Preferences / Secure Preferences 里含有该扩展，也没有 Local Extension Settings 目录），本次不打开任何浏览器。"
   Write-Host ' 请你自己打开平时用 Gemini 的那个 Chrome 就好：插件会靠定时自检自动更新到最新版，任务会等插件连上再做，不会丢。'
   $chromeSkipped = '没能定位到装了插件的身份'
 }
