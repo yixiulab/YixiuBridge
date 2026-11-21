@@ -24,6 +24,16 @@
 - **不碰别的网站的登录态**。每个网页模型的适配器只在自己的域名上运行。
 - **不静默执行敏感操作**。以后的版本如果加发帖/支付类工具，必须走用户在侧边栏的显式确认；现在没有，就不存在这个口子。
 
+## 一键更新脚本的安全边界（v0.3）
+
+`scripts/update-and-start.ps1`（由仓库根目录的 `一键启动.bat` 从 `%TEMP%` 复制后执行）只做这几件事，边界如下：
+
+- **令牌只用于一次下载**：GitHub PAT 只从本机 `~/.yixiubridge/config.json` 的 `github_token` 读，只放进 `Authorization` 头下载 `codeload.github.com` 的 main 分支 ZIP，绝不打印、绝不写进日志、绝不进仓库。没有令牌就跳过更新、只启动服务。
+- **只停自己的桥**：重启桥时，只停占 8765 端口的 **Node** 进程；端口被非 Node 进程占了就不停它，只提示手动处理。
+- **绝不动别的浏览器**：脚本**不杀 chrome.exe、不关任何窗口**；只用 `--profile-directory` 打开按扩展 ID 定位到的那一个 Chrome 身份（见 README「多 Chrome 身份」一节）。定位不到就不打开任何浏览器。
+- **`config.json` 里新增的字段**：`last_chrome_profile`（上次选中的身份目录名，如 `Profile 21`）只是个平局参考提示，不敏感；令牌字段仍只有 `github_token` 一个，文件权限仍是 0600。
+- **脚本自身不被覆盖**：`.bat` 把 `.ps1` 复制到 `%TEMP%` 后再执行，所以解压覆盖仓库文件夹时不会动到正在运行的脚本。
+
 ## 残留风险（说清楚）
 
 - **GitHub PAT 的权限**：muse-runner 用的 classic PAT 只勾 `repo` 一个 scope，够读写任务文件就行；它能读写该账号有权限的所有仓库，所以请用小号或只给必要权限的账号开，丢了就去 GitHub 网页撤销（Settings -> Developer settings -> Personal access tokens）。令牌只存在本机 config.json，仓库里、聊天里、日志里都不会出现。
