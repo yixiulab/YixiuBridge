@@ -39,7 +39,7 @@ node bin/yixiubridge.mjs bridge
 # 「Muse 直接指挥 Gemini」一节：github-token -> bridge -> runner。
 ```
 
-## MCP 工具（v0.2.0）
+## MCP 工具（v0.3.0）
 
 | 工具 | 作用 |
 |---|---|
@@ -83,6 +83,8 @@ Muse（云端） --读答案--> tasks/done/<id>.answer.json
 
 ### 一次性设置（在你电脑上做一次）
 
+> **现在推荐：直接双击仓库根目录的 `一键启动.bat`**（见下面「一键启动与自动更新」一节）。它会自动完成更新、打包插件、启动桥和 runner、打开装了插件的那个 Chrome。下面的手动命令只在排障时用。
+
 ```bash
 # 1. 在 GitHub 网页上建一个 classic PAT：
 #    Settings -> Developer settings -> Personal access tokens -> Tokens (classic)
@@ -101,6 +103,28 @@ node bin/yixiubridge.mjs runner
 之后只要桥、插件、runner 都在跑，Muse 写个任务文件就能指挥 Gemini，不用人盯着。runner 一次只做一个任务（最老的先做）；桥没启动、插件没连上、浏览器正忙时，任务留在原地等下一轮，不会丢；令牌不对会在日志里报 401，不会把令牌打出来。
 
 > 令牌只存在你电脑 `~/.yixiubridge/config.json` 的 `github_token` 字段里（文件权限 0600），只发给 api.github.com。想收回就去 GitHub 网页删掉那个 PAT，或删 config.json 里这一行。详见 [SECURITY.md](SECURITY.md)。
+
+## 一键启动与自动更新（v0.3 新增）
+
+**这次是最后一次手动更新。** 更新到 0.3.0 之后，以后每次只需要双击仓库根目录的 **`一键启动.bat`**，它会自己完成：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner → 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件。
+
+工作原理：
+
+- `一键启动.bat` 把 `scripts/update-and-start.ps1` 复制到 `%TEMP%` 后再执行——这样解压覆盖仓库文件夹时，不会动到正在运行的脚本自身。
+- 更新用 GitHub 令牌（只从本机 `~/.yixiubridge/config.json` 读，`Authorization` 头只发给 `codeload.github.com`，绝不打印）下载 main 分支 ZIP；没有令牌就跳过更新、只启动服务，并明说原因。
+- 桥的 `/status` 多了一个 `disk_version` 字段，每次调用都现读磁盘上的 `package.json`（不是启动时缓存的版本）。插件 service worker 用 `chrome.alarms` 每 60 秒查一次：如果磁盘版本比插件当前版本新、且不是上次已自动重载过的版本，就调 `chrome.runtime.reload()` 自动重载插件。更新完一分钟内插件自己变成最新版，不用手动重载。
+- 重启桥时只停占 8765 端口的 **Node** 进程；如果端口被别的程序占了，不停它、只提示。启动 runner 前先看锁文件对应的进程还活不活着，活着就跳过。
+
+### 多 Chrome 身份：只动装了插件的那一个
+
+用户电脑上有多个 Chrome 身份，Gemini 和 YixiuBridge 只装在其中一个上。一键启动**绝不会**无条件打开默认 Chrome，也**绝不会**杀 chrome.exe、关任何窗口：
+
+1. **绝不写死路径。** 每次运行时动态发现：先找 `chrome.exe`（注册表 App Paths、`(Get-Command chrome).Path`、标准路径，Program Files 与 Program Files (x86) 都查，正式版/Beta/Canary 各通道都查），再扫 `%LOCALAPPDATA%\Google\Chrome\User Data` 下各身份文件夹的 `Secure Preferences`，找含有扩展 ID `alcjfcjfkfhfacgofhgoenljfenbcgcel` 的身份目录名（如 `Profile 21`）。用户随时加新账号、新浏览器也不怕。
+2. **只开那一个。** 用 `chrome.exe --profile-directory="<找到的目录名>" https://gemini.google.com` 启动；如果该身份的 Chrome 已在运行，这条命令只会把标签页交给已有的那个实例，不会动别的身份。启动前先查已有 `chrome.exe` 进程的命令行是否已含该身份目录，已在运行就不重复开。
+3. **多个身份都装了插件时**：优先选已有进程在运行的那个匹配身份；都没在运行就选匹配身份里 `Preferences` 最近修改的那个；选了哪个、为什么都写进日志。上次选中的身份目录会存在 `~/.yixiubridge/config.json` 的 `last_chrome_profile` 里，但**只做平局时的参考**——每次运行都重新扫描，以新扫描结果为准，新加的账号以新结果为准。
+4. **定位不到时**：不启动任何浏览器，只完成磁盘更新 + 桥与 runner 的重启，并打印一句清楚的话，让用户自己打开平时用 Gemini 的那个 Chrome。插件靠定时自检会自动重载，任务会等插件连上再做，不会丢。
+
+> 侧边栏显示的本机身份别名（如 `Profile-akm8rx` / `Profile-trz39v`）是每个 Chrome 身份第一次装插件时随机生成的、存在该身份 `chrome.storage.local` 里的 `yixiubridge.profile`，只有重装插件或换 Chrome 身份时才会变——它只是个显示名，更新脚本定位身份时从来不用它，只用稳定的扩展 ID 和身份目录名。
 
 ## 项目结构
 
@@ -133,5 +157,6 @@ npm run check     # node --check 全部 JS 文件
 ## 路线图
 
 - v0.2（已做完）：`list_models` + `ask_gemini` 选模型/思考等级 + muse-runner（Muse 经 GitHub 任务通道直接指挥 Gemini）
-- v0.3：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
-- v0.4：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
+- v0.3（已做完）：Gemini 发送按钮修复（按 `arrow_upward` 图标定位 + 放宽搜索 + 失败自带诊断）+ 一键更新/启动（双击 `一键启动.bat`）+ 插件自动重载（`disk_version` + alarms 自检）
+- v0.4：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
+- v0.5：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
