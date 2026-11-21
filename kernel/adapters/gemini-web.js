@@ -54,6 +54,11 @@
 //   models may start a new chat in Gemini web; ask_gemini asks one
 //   self-contained question per call, so it does not depend on history.
 
+// - Version self-check (v0.3.1): every ask/listModels result and error
+//   carries adapter_version (ADAPTER_VERSION, same as the release
+//   version). The router verifies it in the ping handshake before every
+//   ask, and the runner logs it next to the bridge version — a stale
+//   adapter in an old tab is now diagnosed from the result alone.
 // - The adapter NEVER throws a bare error from ask(): it returns a structured
 //   { ok:false, error } object, and the tool handler turns that into an MCP
 //   error string. Timeouts are explicit, never silent.
@@ -164,6 +169,16 @@
     sendCheckMs: 1000,
     model: 'gemini-web',
   };
+
+  // Adapter version — stamped into EVERY ask/listModels result and error.
+  // It MUST match the release version (manifest, package.json, service
+  // worker, content script). The router compares it with the running
+  // extension version before every ask: a Gemini tab opened before an
+  // extension update still runs the OLD adapter, and without this stamp
+  // the failure looks identical to a UI change (this bit us on 2026-11-21:
+  // task -003 failed with the 0.2.0 error text while the panel showed
+  // 0.3.0). Bump this together with the release version, everywhere.
+  var ADAPTER_VERSION = '0.3.1';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -564,7 +579,7 @@
 
     // Open the picker, read the menu, close it again. Never changes the
     // selection. Returns { ok, current, buttonText, models: [...] }.
-    async function listModels() {
+    async function listModelsImpl() {
       try {
         var opened = await openModelMenu();
         if (!opened.ok) return opened;
@@ -582,6 +597,15 @@
         try { await closeModelMenu(); } catch (e2) { /* ignore */ }
         return { ok: false, error: 'gemini list_models error: ' + (e && e.message ? e.message : String(e)) };
       }
+    }
+
+    // Every list_models result — success or failure — carries the adapter
+    // version, so a stale adapter in an old tab is diagnosed from the
+    // result alone instead of looking like a UI change.
+    async function listModels() {
+      var res = await listModelsImpl();
+      if (res && typeof res === 'object') res.adapter_version = ADAPTER_VERSION;
+      return res;
     }
 
     function describeModels(items) {
@@ -756,7 +780,7 @@
 
     // Full ask flow: find box -> fill -> send -> wait -> extract.
     // Always resolves to a structured result; never throws.
-    async function ask(prompt, askOpts) {
+    async function askImpl(prompt, askOpts) {
       var startedAt = Date.now();
       askOpts = askOpts || {};
       var limit = askOpts.timeoutMs || timeoutMs;
@@ -844,7 +868,17 @@
       }
     }
 
+    // Every ask result — success, failure, timeout — carries the adapter
+    // version. The runner logs it next to the bridge version and flags a
+    // mismatch, so the next stale-tab failure needs no guessing.
+    async function ask(prompt, askOpts) {
+      var res = await askImpl(prompt, askOpts);
+      if (res && typeof res === 'object') res.adapter_version = ADAPTER_VERSION;
+      return res;
+    }
+
     return {
+      ADAPTER_VERSION: ADAPTER_VERSION,
       SELECTORS: SELECTORS,
       KNOWN_MODELS: KNOWN_MODELS,
       MODEL_LABELS: MODEL_LABELS,
@@ -863,5 +897,5 @@
     };
   }
 
-  return { createAdapter: createAdapter, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS, RECOMMENDED_MODEL: RECOMMENDED_MODEL };
+  return { createAdapter: createAdapter, ADAPTER_VERSION: ADAPTER_VERSION, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS, RECOMMENDED_MODEL: RECOMMENDED_MODEL };
 });
