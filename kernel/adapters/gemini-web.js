@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.1';
+  var ADAPTER_VERSION = '0.4.2';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1017,12 +1017,18 @@
     }
 
     // Select a thinking level (e.g. "高" / "中" / "低") from the 思考等级
-    // submenu. Best-effort: the submenu layout is not fully known, so a
-    // missing submenu or level fails fast with a clear error instead of
-    // guessing. Verification again uses the picker button text ("Neon 高").
+    // submenu. The LEVEL itself is validated strictly (an unknown level
+    // is a caller error, code 'invalid-level'). Everything about APPLYING
+    // it is best-effort (code 'apply-failed'): the submenu may be
+    // missing, a click may miss, or the picker button may not re-render
+    // — askImpl treats those as a warning and asks anyway instead of
+    // failing the whole task (v0.4.2: the real page left the button on
+    // "Neon" after choosing 高, which failed every ask until this was
+    // non-fatal). Verification polls the button text for ~2s instead of
+    // trusting a single 400ms read.
     async function selectThinkingLevel(level) {
       var want = String(level || '').trim();
-      if (!want) return { ok: false, error: 'gemini thinking level is empty' };
+      if (!want) return { ok: false, code: 'invalid-level', error: 'gemini thinking level is empty' };
       var opened = await openModelMenu();
       if (!opened.ok) return opened;
       var trigger = null;
@@ -1031,11 +1037,11 @@
       }
       if (!trigger) {
         await closeModelMenu();
-        return { ok: false, error: 'gemini thinking-level submenu not found in the model menu — the UI may have changed' };
+        return { ok: false, code: 'apply-failed', error: 'gemini thinking-level submenu not found in the model menu — the UI may have changed' };
       }
       try { trigger.click(); } catch (e) {
         await closeModelMenu();
-        return { ok: false, error: 'gemini thinking-level submenu click failed: ' + (e && e.message ? e.message : String(e)) };
+        return { ok: false, code: 'apply-failed', error: 'gemini thinking-level submenu click failed: ' + (e && e.message ? e.message : String(e)) };
       }
       await sleep(400);
       var levelItems = readModelMenuItems();
@@ -1052,19 +1058,20 @@
       }
       if (!match) {
         await closeModelMenu();
-        return { ok: false, error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
+        return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
       try { match.click(); } catch (e) {
         await closeModelMenu();
-        return { ok: false, error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
+        return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
       }
-      await sleep(400);
-      var btnText = getCurrentModelText();
-      if (!btnText || btnText.indexOf(want) === -1) {
-        await closeModelMenu();
-        return { ok: false, error: 'gemini thinking level did not stick — picker still shows "' + (btnText || '') + '" after choosing level "' + want + '"' };
+      var btnText = '';
+      for (var k = 0; k < 5; k++) {
+        await sleep(400);
+        btnText = getCurrentModelText();
+        if (btnText && btnText.indexOf(want) !== -1) return { ok: true, thinking: want };
       }
-      return { ok: true, thinking: want };
+      await closeModelMenu();
+      return { ok: false, code: 'apply-failed', error: 'gemini thinking level did not stick — picker still shows "' + (btnText || '') + '" after choosing level "' + want + '"' };
     }
 
     // ---------- /model selection ----------
@@ -1158,9 +1165,16 @@
           if (!sel.ok) return sel;
           selectedModel = sel.model;
         }
+        // Thinking level: an invalid level is a caller error and fails
+        // fast; a failure to APPLY it only warns (v0.4.2) — the answer
+        // is the deliverable, the level is best-effort.
+        var thinkingWarning = null;
         if (askOpts.thinking) {
           var th = await selectThinkingLevel(askOpts.thinking);
-          if (!th.ok) return th;
+          if (!th.ok) {
+            if (th.code === 'invalid-level') return th;
+            thinkingWarning = th.error;
+          }
         }
         // The model switch can re-render the input area and can leave the
         // menu open; close it and let the DOM settle before looking for
@@ -1245,7 +1259,9 @@
         if (!done.answer) {
           return { ok: false, error: 'gemini answer finished but no response text could be extracted — UI may have changed', polls: done.polls, elapsedMs: done.elapsedMs };
         }
-        return { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
+        var out = { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
+        if (thinkingWarning) out.thinkingWarning = thinkingWarning;
+        return out;
       } catch (e) {
         return { ok: false, error: 'gemini adapter error: ' + (e && e.message ? e.message : String(e)) };
       }
