@@ -165,6 +165,31 @@ export async function getLocalVersion(installDir, { fsImpl = fsPromises } = {}) 
     return null;
   }
 }
+
+// A release counts as stable only when builds/builds.json on main lists
+// it with channel 'stable'. An unreadable or missing index, or a
+// version with no entry, counts as NOT stable (fail closed: the
+// automatic updater never installs an unvetted version). The explicit
+// one-shot CLI (scripts/online-update-cli.mjs) does not use this check —
+// the user chose to run it by hand.
+export async function isStableRelease({ token, version, fetchImpl = globalThis.fetch }) {
+  let buf;
+  try {
+    buf = await fetchRemoteFileBuffer('builds/builds.json', { token, fetchImpl });
+  } catch (e) {
+    return false;
+  }
+  let index;
+  try {
+    index = JSON.parse(buf.toString('utf8'));
+  } catch (e) {
+    return false;
+  }
+  const builds = index && Array.isArray(index.builds) ? index.builds : [];
+  const entry = builds.find((b) => b && b.version === version);
+  return !!entry && entry.channel === 'stable';
+}
+
 export function compareSemver(a, b) {
   const parse = (v) =>
     String(v ?? '')
