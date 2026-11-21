@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,9 @@ import {
   saveConfig,
   createFileLogger,
   acquireLock,
+  findExtensionProfile,
+  createChromeOpener,
+  EXTENSION_ID,
 } from '../host/muse-runner.mjs';
 
 // ---------- fake GitHub (in-memory repo) ----------
@@ -667,4 +670,176 @@ test('acquireLock takes over when the lock PID is alive but there is no heartbea
   } finally {
     child.kill();
   }
+});
+
+// ---------- auto-open Chrome when no extension is connected (v0.3.7) ----------
+// Background: 2026-11-21, the 0.3.6 update — the runner logged "bridge is
+// up but no Chrome extension is connected" once a minute for 12 minutes
+// (19:11–19:23) and did nothing; the loop only closed when the user opened
+// Profile 21's Chrome by hand. The runner now opens Chrome itself when a
+// task is waiting and no extension is connected.
+
+async function makeUserData(profiles) {
+  // profiles: { 'Profile 21': { secure: <object|null>, prefs: <object|null> } }
+  const dir = await mkdtemp(join(tmpdir(), 'yixiubridge-userdata-'));
+  for (const [name, files] of Object.entries(profiles)) {
+    await mkdir(join(dir, name), { recursive: true });
+    if (files.secure !== undefined && files.secure !== null) {
+      await writeFile(join(dir, name, 'Secure Preferences'), JSON.stringify(files.secure), 'utf8');
+    }
+    if (files.prefs !== undefined && files.prefs !== null) {
+      await writeFile(join(dir, name, 'Preferences'), JSON.stringify(files.prefs), 'utf8');
+    }
+  }
+  return dir;
+}
+
+function securePrefsWithExtension(path) {
+  return {
+    extensions: { settings: { [EXTENSION_ID]: { location: 4, path } } },
+    protection: { macs: { extensions: { settings: { [EXTENSION_ID]: 'hash' } } } },
+  };
+}
+
+function securePrefsStaleMacsOnly() {
+  // The ID appears only as a protection-MAC key: Chrome kept the integrity
+  // hash after the install record was removed. Substring search matches
+  // this profile; a settings-key check must not.
+  return {
+    extensions: { settings: {} },
+    protection: { macs: { extensions: { settings: { [EXTENSION_ID]: 'hash' } } } },
+  };
+}
+
+test('findExtensionProfile picks confirmed Profile 21 over unconfirmed Profile 18, even when 18 is newer', async () => {
+  const dir = await makeUserData({
+    'Profile 21': { secure: securePrefsWithExtension('C:\\software\\myself\\YixiuBridge-main\\extension') },
+    'Profile 18': { secure: securePrefsStaleMacsOnly() },
+    'Profile 2': { secure: { extensions: { settings: {} } } },
+  });
+  // Make Profile 18 the most recently modified profile: recency alone
+  // would pick it (that is how 0.3.4 mis-picked it on the real machine).
+  const now = new Date();
+  await utimes(join(dir, 'Profile 18', 'Secure Preferences'), now, now);
+  await utimes(join(dir, 'Profile 21', 'Secure Preferences'), new Date(now.getTime() - 3600000), new Date(now.getTime() - 3600000));
+  const found = await findExtensionProfile(dir);
+  assert.equal(found.profileDir, 'Profile 21');
+  assert.equal(found.confirmed, true);
+  assert.equal(found.loadedPath, 'C:\\software\\myself\\YixiuBridge-main\\extension');
+  // A cached unconfirmed profile must not win over a confirmed one.
+  const cached = await findExtensionProfile(dir, { preferredProfileDir: 'Profile 18' });
+  assert.equal(cached.profileDir, 'Profile 21', 'an unconfirmed cached profile never beats a confirmed match');
+});
+
+test('findExtensionProfile returns an unconfirmed match when nothing is confirmed, and null when nothing matches', async () => {
+  const onlyStale = await makeUserData({ 'Profile 18': { secure: securePrefsStaleMacsOnly() } });
+  const stale = await findExtensionProfile(onlyStale);
+  assert.equal(stale.profileDir, 'Profile 18');
+  assert.equal(stale.confirmed, false);
+  const empty = await makeUserData({ 'Profile 2': { secure: { extensions: { settings: {} } } } });
+  assert.equal(await findExtensionProfile(empty), null);
+  const missing = join(tmpdir(), 'yixiubridge-does-not-exist-' + Date.now());
+  assert.equal(await findExtensionProfile(missing), null);
+});
+
+test('createChromeOpener opens Chrome with the right profile, throttles, and caps attempts per task', async () => {
+  const spawns = [];
+  const fakeSpawn = (exe, args, opts) => {
+    spawns.push({ exe, args, opts });
+    return { unref() {} };
+  };
+  let nowMs = 1000000;
+  const opener = createChromeOpener({
+    dataDir: await mkdtemp(join(tmpdir(), 'yixiubridge-opener-')),
+    platform: 'win32',
+    env: { LOCALAPPDATA: 'C:\\Users\\at\\AppData\\Local' },
+    spawnImpl: fakeSpawn,
+    findProfileFn: async () => ({ profileDir: 'Profile 21', confirmed: true }),
+    findExeFn: async () => 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    now: () => nowMs,
+  });
+  const logs = [];
+  const log = (m) => logs.push(m);
+  const first = await opener.ensureConnected({ taskId: 't1', log });
+  assert.equal(first.opened, true);
+  assert.equal(first.profileDir, 'Profile 21');
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].exe, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+  assert.deepEqual(spawns[0].args, ['--profile-directory=Profile 21', 'https://gemini.google.com']);
+  assert.equal(spawns[0].opts.detached, true);
+  assert.ok(logs.some((l) => /正在帮你打开 Chrome（Profile 21）/.test(l)));
+  // Second call right away: throttled, no second window.
+  const throttled = await opener.ensureConnected({ taskId: 't1', log });
+  assert.equal(throttled.opened, false);
+  assert.equal(throttled.reason, 'throttled');
+  assert.equal(spawns.length, 1);
+  // After the 3-minute interval: second and third attempts open again.
+  nowMs += 181000;
+  assert.equal((await opener.ensureConnected({ taskId: 't1', log })).opened, true);
+  nowMs += 181000;
+  assert.equal((await opener.ensureConnected({ taskId: 't1', log })).opened, true);
+  assert.equal(spawns.length, 3);
+  // Fourth attempt for the same task: capped, no more windows.
+  nowMs += 181000;
+  const capped = await opener.ensureConnected({ taskId: 't1', log });
+  assert.equal(capped.opened, false);
+  assert.equal(capped.reason, 'max-attempts');
+  assert.equal(spawns.length, 3);
+  // A different task gets its own attempts.
+  const other = await opener.ensureConnected({ taskId: 't2', log });
+  assert.equal(other.opened, true);
+  assert.equal(spawns.length, 4);
+});
+
+test('createChromeOpener does nothing off Windows, and reports a missing profile or chrome.exe instead of spawning', async () => {
+  const spawns = [];
+  const fakeSpawn = (exe, args, opts) => { spawns.push({ exe, args }); return { unref() {} }; };
+  const base = {
+    dataDir: await mkdtemp(join(tmpdir(), 'yixiubridge-opener-')),
+    env: { LOCALAPPDATA: 'C:\\Users\\at\\AppData\\Local' },
+    spawnImpl: fakeSpawn,
+    findProfileFn: async () => ({ profileDir: 'Profile 21', confirmed: true }),
+    findExeFn: async () => 'C:\\chrome.exe',
+    now: () => 1000000,
+  };
+  const linux = createChromeOpener({ ...base, platform: 'linux' });
+  assert.deepEqual(await linux.ensureConnected({ taskId: 't1', log: () => {} }), { opened: false, reason: 'not-windows' });
+  assert.equal(spawns.length, 0);
+  const noProfile = createChromeOpener({ ...base, platform: 'win32', findProfileFn: async () => null });
+  const r1 = await noProfile.ensureConnected({ taskId: 't1', log: () => {} });
+  assert.equal(r1.opened, false);
+  assert.equal(r1.reason, 'no-profile');
+  assert.equal(spawns.length, 0);
+  const noExe = createChromeOpener({ ...base, platform: 'win32', findExeFn: async () => null });
+  const r2 = await noExe.ensureConnected({ taskId: 't1', log: () => {} });
+  assert.equal(r2.opened, false);
+  assert.equal(r2.reason, 'no-chrome-exe');
+  assert.equal(spawns.length, 0);
+});
+
+test('processOneTask calls the chrome opener when no extension is connected, and never when the bridge is down', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const openedFor = [];
+  const opener = {
+    async ensureConnected({ taskId }) {
+      openedFor.push(taskId);
+      return { opened: true, profileDir: 'Profile 21' };
+    },
+  };
+  const bridge = makeFakeBridge({ extensions: 0 });
+  const res = await processOneTask({ github, bridge, log: () => {}, chromeOpener: opener });
+  assert.equal(res.status, 'no-extension');
+  assert.equal(res.chromeOpened, true);
+  assert.equal(res.chromeProfile, 'Profile 21');
+  assert.deepEqual(openedFor, ['t1'], 'the opener runs once for the waiting task');
+  assert.equal(gh.files.has('tasks/pending/t1.json'), true, 'the task stays pending until the plugin reconnects');
+  assert.equal(bridge.calls.filter((c) => c.op === 'ask').length, 0);
+  // Bridge down: the opener must not run (nothing to connect to).
+  const bridgeDown = makeFakeBridge({ statusUp: false });
+  const res2 = await processOneTask({ github, bridge: bridgeDown, log: () => {}, chromeOpener: opener });
+  assert.equal(res2.status, 'bridge-down');
+  assert.deepEqual(openedFor, ['t1'], 'no Chrome window when the bridge itself is down');
 });
