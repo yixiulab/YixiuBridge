@@ -163,7 +163,7 @@ npm run check     # node --check 全部 JS 文件
 - v0.2（已做完）：`list_models` + `ask_gemini` 选模型/思考等级 + muse-runner（Muse 经 GitHub 任务通道直接指挥 Gemini）
 - v0.3（已做完）：Gemini 发送按钮修复（按 `arrow_upward` 图标定位 + 放宽搜索 + 失败自带诊断）+ 一键更新/启动（双击 `一键启动.bat`）+ 插件自动重载（`disk_version` + alarms 自检）
 - v0.3.1（已做完）：修一键启动第 7 步（`$matches` 自动变量 bug、Secure Preferences 读不到时告警 + `Local Extension Settings` 第二证据、找不到身份绝不乱开浏览器、报错按步骤如实汇报）+ 下载后新版脚本自动接管 + **版本自检**（见下）
-- v0.3.2（已做完）：修一键启动第 7 步的证据来源（解压扩展不在 Secure Preferences 里，主证据改查 `Preferences` 的 `extensions.settings.<ID>`，location 4 + path；匹配时打印加载路径与匹配证据；扫描统计可自诊）
+- v0.3.2（已做完）：修一键启动第 7 步的证据来源（解压扩展不在 Secure Preferences 里，主证据改查 `Preferences` 的 `extensions.settings.<ID>`，location 4 + path；匹配时打印加载路径与匹配证据；扫描统计可自诊）+ 发送按钮找不到时先按回车再报错（回车发出就继续等答案；报错再加箭头图标祖先链诊断）
 - v0.4：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
 - v0.5：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
 
