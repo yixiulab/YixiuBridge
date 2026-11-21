@@ -13,7 +13,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
 
-  var EXTENSION_ID = 'alcjfcjfkfhfacgofhgoenljfenbcgcel';
+  var EXTENSION_ID = 'alcjfcjfkhfacgofhgoenljfenbcgcel';
 
   // Is this a Chrome profile directory name? 'Default' or 'Profile <n>'.
   // Anything else (e.g. 'System Profile', 'Guest Profile') is not a
@@ -24,26 +24,38 @@
   }
 
   // Does this profile show evidence of the extension? Any one of three
-  // signals counts as a match:
-  // (1) the extension ID appears in the profile's regular Preferences
-  //     text — the PRIMARY signal for an unpacked (developer-mode)
-  //     extension: Chrome records it under extensions.settings.<id>
-  //     (location 4, with a `path` field) in Preferences, NOT in Secure
-  //     Preferences. Ground truth 2026-11-21: Profile 21's Secure
-  //     Preferences has no trace of the ID although the extension is
-  //     loaded there — the 0.3.1 scan matched 0 of 72 profiles because
-  //     it only looked at Secure Preferences.
-  // (2) the ID appears in Secure Preferences text (store-installed
-  //     extensions land there);
-  // (3) the profile has a "Local Extension Settings/<id>" directory
-  //     (the extension has used local storage there).
+  // signals counts as a match, in priority order:
+  // (1) the extension ID appears in the profile's Secure Preferences
+  //     text — the PRIMARY signal: Chrome records extension installs
+  //     under extensions.settings.<id> (with a `location` and a `path`
+  //     field) in Secure Preferences, NOT in the regular Preferences
+  //     file. Verified 2026-11-21 from the user's real Profile 21
+  //     Secure Preferences file: the record IS there (location 4,
+  //     path C:\software\myself\YixiuBridge-main\extension,
+  //     from_webstore False, service worker 0.3.2) — and the user's real
+  //     Profile 21 Preferences file (90 KB JSON) has NO
+  //     extensions.settings key at all. The 0.3.2 switch to Preferences
+  //     as primary was WRONG. And the 0.3.1 scan matching 0 of 72
+  //     profiles is now SOLVED too: every scan searched for a
+  //     33-character ID (alcjfcjfkfhfacgofhgoenljfenbcgcel — an extra
+  //     'f', misread from a chrome://extensions screenshot). A real
+  //     Chrome extension ID is always exactly 32 characters, so that
+  //     string could never match anything. The correct ID is
+  //     alcjfcjfkhfacgofhgoenljfenbcgcel (32 chars, a-p only) — see the
+  //     regression test in tests/auto-update.test.mjs.
+  // (2) the profile has a "Local Extension Settings/<id>" directory
+  //     (the extension has used local storage there) — backup evidence;
+  // (3) the ID appears in the regular Preferences text — a WEAK signal,
+  //     kept only because some Chromium-based browsers (Brave, Chromium
+  //     itself) record extensions there instead of in Secure Preferences.
+  //     On Google Chrome it never fires (verified above) and is harmless.
   function profileHasExtension(evidence) {
     if (!evidence) return false;
+    var secure = evidence.securePrefsText;
+    if (typeof secure === 'string' && secure.indexOf(EXTENSION_ID) !== -1) return true;
     if (evidence.localExtSettingsExists) return true;
     var text = evidence.prefsText;
     if (typeof text === 'string' && text.indexOf(EXTENSION_ID) !== -1) return true;
-    var secure = evidence.securePrefsText;
-    if (typeof secure === 'string' && secure.indexOf(EXTENSION_ID) !== -1) return true;
     return false;
   }
 
@@ -53,19 +65,22 @@
   function matchedEvidence(evidence) {
     var out = [];
     if (!evidence) return out;
-    var text = evidence.prefsText;
-    if (typeof text === 'string' && text.indexOf(EXTENSION_ID) !== -1) out.push('Preferences');
     var secure = evidence.securePrefsText;
     if (typeof secure === 'string' && secure.indexOf(EXTENSION_ID) !== -1) out.push('Secure Preferences');
     if (evidence.localExtSettingsExists) out.push('Local Extension Settings');
+    var text = evidence.prefsText;
+    if (typeof text === 'string' && text.indexOf(EXTENSION_ID) !== -1) out.push('Preferences');
     return out;
   }
 
   // The folder Chrome actually loads the unpacked extension from, read
-  // from the profile's Preferences JSON:
+  // from the profile's preferences-format JSON text:
   // extensions.settings.<id>.path (present for location 4 / unpacked).
-  // Returns the path string, or null when absent / unparsable / the ID
-  // is not in the text at all. Never throws.
+  // Callers pass the Secure Preferences text first (primary — that is
+  // where Chrome records installs) and the regular Preferences text as a
+  // fallback; the schema is the same in both files. Returns the path
+  // string, or null when absent / unparsable / the ID is not in the text
+  // at all. Never throws.
   function extensionPathFromPrefs(prefsText) {
     if (typeof prefsText !== 'string' || prefsText.indexOf(EXTENSION_ID) === -1) return null;
     try {
