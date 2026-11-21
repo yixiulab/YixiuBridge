@@ -85,7 +85,7 @@ test('read_page on a Chrome internal page does not attach anything', async () =>
 
 // ---------- list_models / ask_gemini model routing ----------
 
-function makeGeminiRouter({ sendMessageImpl, pingTimeoutMs }) {
+function makeGeminiRouter({ sendMessageImpl, pingTimeoutMs, bridge }) {
   const tab = { id: 7, title: 'Gemini', url: 'https://gemini.google.com/app', active: true, status: 'complete' };
   const reloads = [];
   const fakeChrome = {
@@ -99,7 +99,7 @@ function makeGeminiRouter({ sendMessageImpl, pingTimeoutMs }) {
   };
   const Router = loadRouter(fakeChrome);
   const router = new Router({
-    bridge: { sendTaskUpdate: async () => {} },
+    bridge: bridge || { sendTaskUpdate: async () => {} },
     debugger: { snapshot: async () => ({}) },
     profile: { id: 'Profile-test', label: 'test' },
     version: '0.2.0-test',
@@ -338,4 +338,33 @@ test('list_models error names the adapter version in the error', async () => {
   assert.equal(res.ok, false);
   assert.match(res.error, /model picker button not found/);
   assert.match(res.error, /\[adapter_version: 0\.2\.0-test\]/);
+});
+
+// ---------- task registration at ask start (v0.3.4) ----------
+// Background: task -007 — the bridge timer fired with a bare error and no
+// task_id, so the runner failed while the answer sat in the tab. The router
+// now registers the task with the bridge the moment the ask starts, so the
+// bridge can hand the caller that id on timeout.
+
+test('ask_gemini registers the task with the bridge immediately (running update before the answer)', async () => {
+  const taskUpdates = [];
+  const router = makeGeminiRouter({
+    bridge: { sendTaskUpdate: async (frame) => { taskUpdates.push(frame); } },
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'ask_gemini') {
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10 }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', timeout_s: 30 } });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.answer, 'hi');
+  assert.ok(taskUpdates.length >= 2, 'expected a running registration plus the completion update, got ' + JSON.stringify(taskUpdates));
+  assert.equal(taskUpdates[0].taskId, res.result.task_id);
+  assert.equal(taskUpdates[0].task.status, 'running', 'the first update registers the task as running so the bridge can hand out its id on timeout');
+  assert.equal(taskUpdates[1].taskId, res.result.task_id);
+  assert.equal(taskUpdates[1].task.status, 'done');
 });
