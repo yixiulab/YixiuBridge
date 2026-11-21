@@ -104,9 +104,9 @@ node bin/yixiubridge.mjs runner
 
 > 令牌只存在你电脑 `~/.yixiubridge/config.json` 的 `github_token` 字段里（文件权限 0600），只发给 api.github.com。想收回就去 GitHub 网页删掉那个 PAT，或删 config.json 里这一行。详见 [SECURITY.md](SECURITY.md)。
 
-## 一键启动与自动更新（v0.3 新增，v0.3.1 修第 7 步，v0.3.2 改查 Preferences 是错方向，v0.3.3 改回 Secure Preferences）
+## 一键启动与自动更新（v0.3 新增，v0.3.1 修第 7 步，v0.3.2 改查 Preferences 是错方向，v0.3.3 改回 Secure Preferences，v0.3.4 修 runner 重启与 config.json 保护）
 
-**v0.3.3 不用再手动更新。** 你电脑里已经有 0.3.2 的一键启动.bat，直接双击它就行：它会下载 0.3.3 覆盖，下载完新版启动脚本自动接管继续执行（一次双击跑完新逻辑；直接跑安装目录脚本时交接跳过的 bug 已修）。之后每次也只需要双击它：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner（更新后空闲时自动重启为新版）→ 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件、不用再手动下载 ZIP。
+**v0.3.4 不用再手动更新。** 你电脑里已经有 0.3.3 的一键启动.bat，直接双击它就行：它会下载 0.3.4 覆盖，下载完新版启动脚本自动接管继续执行（一次双击跑完新逻辑；直接跑安装目录脚本时交接跳过的 bug 已修）。之后每次也只需要双击它：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner（更新后空闲时自动重启为新版，这次一定能重启到 0.3.4：重启判断改成代码文件时间比 runner 进程启动时间晚就判旧版）→ 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件、不用再手动下载 ZIP。**runner 的日志现在同时写进文件**（`%USERPROFILE%\.yixiubridge\muse-runner.log`——窗口是最小化的，死掉/卡住时看不到输出，日志文件是唯一的诊断入口；一键启动每次都会把这个路径打印出来）。**如果 runner 启动时报“no github_token”，先去看 `config.json.bak`**：0.3.4 之前的一键启动第 7 步写缓存时可能把令牌弄丢了（0.3.4 已修：读失败绝不写、写前备份、写完核对、无 BOM 写），令牌丢了只能重新生成一个 PAT 再跑 `node bin/yixiubridge.mjs github-token` 保存。
 
 v0.3.1 修了第 7 步找 Chrome 的两个 bug：(1) 扫描结果误存在 PowerShell 自动变量 `$matches` 里，被 `-match` 改写成空对象，导致身份名为空、chrome.exe 路径为 Null——现在改用普通变量，且全脚本不再用 `-match`；(2) Chrome 运行时 `Secure Preferences` 可能读不到，旧脚本静默跳过——现在读不到会告警并列出哪些身份读不到，还多了 `Local Extension Settings\<扩展 ID>` 这条证据；一个身份都匹配不到时绝不乱开浏览器。报错也改实话实说了：会写明第几步失败、桥和 runner 各自起了没有。
 
@@ -165,6 +165,7 @@ npm run check     # node --check 全部 JS 文件
 - v0.3.1（已做完）：修一键启动第 7 步（`$matches` 自动变量 bug、Secure Preferences 读不到时告警 + `Local Extension Settings` 第二证据、找不到身份绝不乱开浏览器、报错按步骤如实汇报）+ 下载后新版脚本自动接管 + **版本自检**（见下）
 - v0.3.2（已做完）：修一键启动第 7 步的证据来源（解压扩展不在 Secure Preferences 里，主证据改查 `Preferences` 的 `extensions.settings.<ID>`，location 4 + path；匹配时打印加载路径与匹配证据；扫描统计可自诊）+ 发送按钮找不到时先按回车再报错（回车发出就继续等答案；报错再加箭头图标祖先链诊断）
 - v0.3.3（已做完）：修 -006 假阳性（confirmSent 只认正在生成或输入框清空，回答只读真正回答容器、首页提示词永不算答案，收不到回答就报“no response appeared”；回车加固为完整 keydown+keypress+keyup；runner 加幂等守卫，done/failed 已存在就不重复提问）+ 修直接跑安装目录脚本时交接永远跳过的哈希 bug（下载前先算哈希）+ 扫描证据改回 Secure Preferences 为主（0.3.2 改查 Preferences 是错方向，Profile 21 的 Preferences 里根本没有 extensions.settings 键）+ **修扩展 ID 写错（之前全仓库用的 33 字符 ID 多了一个 f，改回 32 位真实 ID `alcjfcjfkhfacgofhgoenljfenbcgcel`——0/72 扫描破案，Profile 21 的 Secure Preferences 里确实有这条记录，location 4，path 正是安装目录）** + 更新后 runner 空闲时自动重启为新版
+- v0.3.4（已做完）：修 -007 长答案超时（桥超时后带 task_id 返回 pending，runner 改轮询 `get_answer` 最长 15 分钟再认输；失败文件也带 `bridge_task_id`，方便事后找回答案）+ **修 runner 死掉后锁文件卡住（-008 八分钟没人接：锁文件只剩 PID 时新 runner 直接接管；心跳文件证明 runner 还活着，3 分钟没刷新才算挂；日志同时写进 `muse-runner.log`，最小化窗口看不到时能查）** + **修一键启动第 7 步写缓存时弄丢 `config.json` 里的 github_token（读失败绝不写、写前备份 `config.json.bak`、临时文件原子改名、无 BOM 写 UTF-8、写完核对原有键都在；runner 自己读配置时也容忍 BOM，存配置时原子写）** + 修 0.3.3 更新后 runner 没重启（重启判断改成代码文件时间比进程启动时间晚就判旧版，`-Updated` 开关失效时也能重启）
 - v0.4：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
 - v0.5：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
 
