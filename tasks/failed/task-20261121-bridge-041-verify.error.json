@@ -1,0 +1,9 @@
+{
+  "id": "task-20261121-bridge-041-verify",
+  "error": "ask_gemini failed: ask_gemini: gemini model picker button not found — UI may have changed (tried: button[data-test-id=\"model-switcher\"] | button[aria-label*=\"模型\"] | button[aria-label*=\"model\"] | button[aria-label*=\"Model\"] | [data-test-id=\"model-picker\"], plus buttons showing a model name) [adapter_version: 0.4.1]",
+  "adapter_version": "0.4.1",
+  "bridge_version": "0.4.1",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-21T21:42:13.952Z"
+}
