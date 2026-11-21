@@ -12,14 +12,28 @@
 // Run directly:  node host/bridge-server.mjs [--port 8765]
 // As a library:  import { createBridgeServer } from './bridge-server.mjs'
 import { createServer } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import C from '../kernel/shared/constants.js';
 import TOOLS from '../kernel/control/host/tools.js';
 import { TrustRegistry } from './trust.mjs';
 
 const DEFAULT_DATA_DIR = join(homedir(), '.yixiubridge');
+
+// Version on disk, read fresh from the repo's package.json on every call
+// (never cached at startup). The extension's auto-update check compares
+// this with its running manifest version: after 一键启动.bat downloads a
+// newer ZIP over the install folder, the disk version goes up and the
+// extension reloads itself. Returns null if the file cannot be read.
+const REPO_PACKAGE_JSON = join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+function readDiskVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(REPO_PACKAGE_JSON, 'utf8'));
+    return (pkg && typeof pkg.version === 'string') ? pkg.version : null;
+  } catch (e) { return null; }
+}
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -234,6 +248,7 @@ export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAU
         sendJson(res, 200, {
           ok: true,
           version: C.EXTENSION_VERSION,
+          disk_version: readDiskVersion(),
           extensions: Array.from(extensions.values()).map((e) => e.profile),
           controller: controller.busy ? controller.clientId : null,
           intakeOpen: trust.intakeOpen(),
