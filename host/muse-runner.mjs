@@ -26,7 +26,7 @@
 // Run: node bin/yixiubridge.mjs runner [--interval <seconds>]
 //      node host/muse-runner.mjs [--interval <seconds>]
 // Needs: bridge running, extension loaded, github_token saved.
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { appendFile, chmod, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -42,15 +42,26 @@ export const RUNNER_CLIENT_ID = 'muse-runner/' + C.EXTENSION_VERSION;
 // A single ask_gemini call through the bridge is capped at 300s server-side
 // (timeout_s + 60, max 300). The runner caps its own requests at 240s so
 // the bridge never fires first; longer answers come back via the bridge's
-// task store (GET /tasks/:id), which the runner polls.
+// task store (GET /tasks/:id), which the runner polls. v0.3.4 (task -007):
+// the bridge timeout used to resolve with a bare error and NO task_id, so
+// the runner wrote a failed file while the answer was sitting in the tab.
+// Now a bridge timeout carries the task_id (the router registers it at ask
+// start) and the runner polls get_answer until the answer resolves — up to
+// 15 minutes from the ask start. Long code answers are the normal case.
 const MAX_ASK_TIMEOUT_S = 240;
+const POLL_OVERALL_CAP_MS = 900000; // 15 minutes from the ask start
+const POLL_INTERVAL_MS = 15000; // poll get_answer every 15s
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function formatLogLine(msg) {
+  return '[' + new Date().toISOString() + '] ' + msg;
+}
+
 export function logLine(msg) {
-  console.log('[' + new Date().toISOString() + '] ' + msg);
+  console.log(formatLogLine(msg));
 }
 
 // ---------- config (shared with the CLI) ----------
@@ -58,7 +69,13 @@ export function logLine(msg) {
 export async function loadConfig(dataDir = DEFAULT_DATA_DIR) {
   try {
     const raw = await readFile(join(dataDir, 'config.json'), 'utf8');
-    const cfg = JSON.parse(raw);
+    // Tolerate a leading BOM: Windows PowerShell 5.1 Set-Content
+    // -Encoding UTF8 writes one, and JSON.parse chokes on it (v0.3.4,
+    // 2026-11-21: the updater's step-7 cache write BOM'd config.json and
+    // the runner then failed to start with "no github_token" although the
+    // token was still in the file). Strip it before parsing.
+    const text = raw.charCodeAt(0) === 0xFEFF ? raw.slice(1) : raw;
+    const cfg = JSON.parse(text);
     return (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) ? cfg : {};
   } catch (e) {
     return {};
@@ -67,12 +84,16 @@ export async function loadConfig(dataDir = DEFAULT_DATA_DIR) {
 
 // Merge `patch` into the existing config file (other fields preserved) and
 // save it with 0600 permissions (POSIX; best effort on Windows).
+// Atomic write (v0.3.4): temp file + rename, so a crash mid-write can
+// never truncate config.json and lose the github_token.
 export async function saveConfig(dataDir, patch) {
   await mkdir(dataDir, { recursive: true });
   const cfg = { ...(await loadConfig(dataDir)), ...patch };
   const path = join(dataDir, 'config.json');
-  await writeFile(path, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-  try { await chmod(path, 0o600); } catch (e) { /* Windows: best effort */ }
+  const tmp = path + '.tmp';
+  await writeFile(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+  try { await chmod(tmp, 0o600); } catch (e) { /* Windows: best effort */ }
+  await rename(tmp, path);
   return cfg;
 }
 
@@ -121,7 +142,7 @@ export function logFilePath(date) {
   return 'tasks/log/' + y + '-' + m + '-' + day + '.json';
 }
 
-export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, answeredModel = null, adapterVersion = null, bridgeVersion = null }) {
+export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, answeredModel = null, adapterVersion = null, bridgeVersion = null, bridgeTaskId = null }) {
   return {
     id: task.id,
     status, // 'done' | 'failed'
@@ -130,6 +151,7 @@ export function buildLogEntry({ task, status, elapsedMs = null, error = null, as
     answered_model: answeredModel,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
+    bridge_task_id: bridgeTaskId,
     elapsed_ms: elapsedMs,
     error: error || null,
     at: new Date().toISOString(),
@@ -239,7 +261,7 @@ export function createGitHubClient({ token, fetchImpl = fetch, repo = REPO } = {
 
 // ---------- bridge caller (local HTTP, 127.0.0.1 only) ----------
 
-export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch, pollMs = 5000 } = {}) {
+export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch, pollMs = POLL_INTERVAL_MS, overallCapMs = POLL_OVERALL_CAP_MS } = {}) {
   async function status() {
     try {
       const res = await fetchImpl(bridgeUrl + '/status');
@@ -259,9 +281,20 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
   }
 
-  async function pollTask(taskId, timeoutS) {
-    const deadline = Date.now() + (timeoutS + 120) * 1000;
-    while (Date.now() < deadline) {
+  // Poll GET /tasks/:id until the task resolves. The overall cap runs from
+  // the original ask start (the caller passes the deadline), NOT from the
+  // poll start — a long answer that took 240s to stream still gets the
+  // full remaining budget. Returns the answer (with bridgeTaskId); throws
+  // on a genuine task failure or when the cap runs out. Every throw
+  // carries e.bridgeTaskId so the failed file can name the bridge task
+  // for a later get_answer (v0.3.4).
+  async function pollTask(taskId, deadlineMs, capMs) {
+    for (;;) {
+      if (Date.now() >= deadlineMs) {
+        const e = new Error('ask_gemini task ' + taskId + ' did not finish within ' + Math.round(capMs / 1000) + 's — poll get_answer with task_id ' + taskId + ' for the result');
+        e.bridgeTaskId = taskId;
+        throw e;
+      }
       await sleep(pollMs);
       let t;
       try {
@@ -272,7 +305,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, bridgeTaskId: taskId };
       }
       if (t.status === 'failed') {
         // Keep the version tag in the message (it lands in the failed
@@ -281,15 +314,20 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
           + (t.adapterVersion ? ' [adapter_version: ' + t.adapterVersion + ']' : '');
         const e = new Error(msg);
         e.adapterVersion = t.adapterVersion || null;
+        e.bridgeTaskId = taskId;
         throw e;
       }
       // 'running' or 'unknown' — keep polling.
     }
-    throw new Error('ask_gemini task ' + taskId + ' did not finish in time');
   }
 
   async function ask({ prompt, model, timeoutMs }) {
     const timeoutS = Math.min(Math.max(Math.round((timeoutMs || 180000) / 1000), 5), MAX_ASK_TIMEOUT_S);
+    // Overall budget for the whole ask, including polling after a
+    // timeout/pending: 15 minutes from the ask start (v0.3.4, task -007 —
+    // a long code answer that streams for 4+ minutes is normal, not a
+    // failure).
+    const overallDeadline = Date.now() + overallCapMs;
     const ctrl = new AbortController();
     const abortMs = Math.min((timeoutS + 90) * 1000, 300000);
     const timer = setTimeout(() => ctrl.abort(), abortMs);
@@ -307,6 +345,11 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       clearTimeout(timer);
     }
     if (!out.ok) {
+      // Bridge-side timeout WITH a task_id (v0.3.4): the ask is still
+      // running in the browser — poll for the result instead of failing.
+      // Without a task_id there is nothing to poll; fail as before
+      // (connection error, no extension, browser busy).
+      if (out.task_id) return pollTask(out.task_id, overallDeadline, overallCapMs);
       const e = new Error(out.error || 'bridge call failed');
       if (/browser busy/.test(out.error || '')) e.code = 'busy';
       // The router embeds "[adapter_version: X]" in its error strings;
@@ -315,8 +358,8 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       throw e;
     }
     const r = out.result || {};
-    if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, timeoutS);
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null };
+    if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, overallDeadline, overallCapMs);
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, bridgeTaskId: r.task_id || null };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
@@ -436,15 +479,20 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
     }
     const errMsg = e.message || String(e);
     const adapterVersion = e.adapterVersion || adapterVersionFromError(errMsg);
+    const bridgeTaskId = e.bridgeTaskId || null;
     logVersionMismatch(log, bridgeVersion, adapterVersion);
-    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, failed_at: new Date().toISOString() };
+    // v0.3.4: the failed file carries the bridge task_id whenever one
+    // exists, so the answer can still be retrieved later via get_answer
+    // even when this run gave up (e.g. the 15-minute poll cap ran out).
+    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, failed_at: new Date().toISOString() };
     await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
     await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
-    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, adapterVersion, bridgeVersion }), log);
-    return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion };
+    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+    return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId };
   }
 
   const adapterVersion = answer.adapterVersion || null;
+  const bridgeTaskId = answer.bridgeTaskId || null;
   logVersionMismatch(log, bridgeVersion, adapterVersion);
   const doneDoc = {
     id: task.id,
@@ -455,33 +503,109 @@ export async function processOneTask({ github, bridge, log = () => {} } = {}) {
     answered_model: answer.model || null,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
+    bridge_task_id: bridgeTaskId,
     answered_at: new Date().toISOString(),
   };
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
-  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion }), log);
-  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion };
+  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId };
 }
 
 // ---------- run loop ----------
 
-async function acquireLock(dataDir) {
+// File logger (v0.3.4): the runner starts minimized, so a dead/hung runner
+// is invisible and its console output is unreachable (-008 sat unpicked
+// for 8+ minutes with no window to look at). Every timestamped log line
+// is appended to ~/.yixiubridge/muse-runner.log as well as stdout. The
+// file rotates at 1 MiB (old content -> .log.1). Logging never throws —
+// a logging failure must not kill the runner.
+export const RUNNER_LOG_NAME = 'muse-runner.log';
+export const RUNNER_LOG_MAX_BYTES = 1024 * 1024;
+export const RUNNER_HEARTBEAT_NAME = 'muse-runner.heartbeat';
+export const RUNNER_HEARTBEAT_MS = 30000; // a live runner refreshes this often
+export const RUNNER_HEARTBEAT_STALE_MS = 180000; // no refresh this long = hung/dead
+
+export async function createFileLogger(dataDir) {
+  const logPath = join(dataDir, RUNNER_LOG_NAME);
+  await mkdir(dataDir, { recursive: true });
+  try {
+    const st = await stat(logPath);
+    if (st.size > RUNNER_LOG_MAX_BYTES) {
+      try { await unlink(logPath + '.1'); } catch (e) { /* no old rotated file */ }
+      try { await rename(logPath, logPath + '.1'); } catch (e) { /* fall through and append */ }
+    }
+  } catch (e) { /* no log file yet — fine */ }
+  return {
+    path: logPath,
+    async log(line) {
+      try { await appendFile(logPath, line + '\n'); } catch (e) { /* never crash on logging */ }
+    },
+  };
+}
+
+async function writeHeartbeat(dataDir) {
+  try {
+    await writeFile(join(dataDir, RUNNER_HEARTBEAT_NAME), JSON.stringify({ pid: process.pid, at: new Date().toISOString() }), { mode: 0o600 });
+  } catch (e) { /* best effort */ }
+}
+
+async function readHeartbeat(dataDir) {
+  try {
+    const hb = JSON.parse(await readFile(join(dataDir, RUNNER_HEARTBEAT_NAME), 'utf8'));
+    if (hb && Number.isFinite(hb.pid) && typeof hb.at === 'string') {
+      const at = Date.parse(hb.at);
+      if (Number.isFinite(at)) return { pid: hb.pid, at };
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Single-instance lock with stale-lock takeover (v0.3.4, task -008): the
+// old code refused to start whenever the lock file existed and its PID
+// answered process.kill(pid, 0) — but a dead runner leaves the lock
+// behind, and a recycled PID can answer "alive" even though the runner
+// is gone. The lock file stays a bare PID on line 1 (the PowerShell
+// updater reads it with a ^\d+$ regex). Liveness is proven by the
+// heartbeat file instead: a live runner refreshes it every 30s.
+//   - lock PID dead -> take over immediately.
+//   - lock PID alive + heartbeat fresh (same pid, < 3 min) -> refuse.
+//   - lock PID alive + heartbeat stale/missing -> the runner is hung, an
+//     old version without heartbeats, or the PID was recycled: take over
+//     and say so loudly in the log. The old process is NOT killed here —
+//     stopping a hung runner is the updater's job (it verifies the
+//     process name first); two runners can briefly coexist, and the
+//     bridge lock + idempotency guard keep that from double-asking.
+export async function acquireLock(dataDir, log = logLine) {
   const lockPath = join(dataDir, 'muse-runner.lock');
   const pid = String(process.pid);
   try {
     await writeFile(lockPath, pid + '\n', { flag: 'wx', mode: 0o600 });
+    await writeHeartbeat(dataDir);
     return lockPath;
   } catch (e) {
     if (e.code !== 'EEXIST') throw e;
-    // Stale lock? The PID inside is dead -> take over. Alive -> refuse.
     let oldPid = null;
     try { oldPid = parseInt((await readFile(lockPath, 'utf8')).trim(), 10); } catch (e2) { /* unreadable */ }
     if (oldPid && oldPid !== process.pid) {
       let alive = false;
       try { process.kill(oldPid, 0); alive = true; } catch (e3) { alive = false; }
-      if (alive) throw new Error('muse-runner is already running (pid ' + oldPid + ', lock ' + lockPath + ')');
+      if (alive) {
+        const hb = await readHeartbeat(dataDir);
+        if (hb && hb.pid === oldPid && Date.now() - hb.at < RUNNER_HEARTBEAT_STALE_MS) {
+          throw new Error('muse-runner is already running (pid ' + oldPid + ', heartbeat ' + Math.round((Date.now() - hb.at) / 1000) + 's ago, lock ' + lockPath + ')');
+        }
+        log('stale lock: pid ' + oldPid + ' is alive but its heartbeat is '
+          + (hb ? 'stale (' + Math.round((Date.now() - hb.at) / 1000) + 's old)' : 'missing')
+          + ' — the previous runner is hung, an old version, or the PID was recycled; taking over the lock (the old process was NOT killed)');
+      } else {
+        log('stale lock: pid ' + oldPid + ' is dead — taking over the lock');
+      }
     }
     await writeFile(lockPath, pid + '\n', { mode: 0o600 });
+    await writeHeartbeat(dataDir);
     return lockPath;
   }
 }
@@ -491,17 +615,30 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
   if (!cfg.github_token) {
     throw new Error('no github_token in ' + join(dataDir, 'config.json') + ' — run: node bin/yixiubridge.mjs github-token');
   }
+  // File logger first (v0.3.4): the lock-takeover messages below must land
+  // in the log file too, not just the (minimized, invisible) console.
+  const fileLogger = await createFileLogger(dataDir);
+  const log = (msg) => { const line = formatLogLine(msg); console.log(line); fileLogger.log(line); };
   const interval = (Number.isFinite(intervalS) && intervalS > 0)
     ? intervalS
     : (cfg.runner_interval_s || DEFAULT_INTERVAL_S);
   const github = createGitHubClient({ token: cfg.github_token, fetchImpl });
   const bridge = createBridgeCaller({ bridgeUrl, fetchImpl });
-  const lockPath = await acquireLock(dataDir);
-  const cleanup = async () => { try { await unlink(lockPath); } catch (e) { /* already gone */ } };
+  const lockPath = await acquireLock(dataDir, log);
+  // Heartbeat (v0.3.4): proves this runner is alive. A later runner that
+  // finds a stale lock uses it to tell a live runner from a dead one.
+  // unref so it never keeps the process alive on its own.
+  const heartbeatTimer = setInterval(() => { writeHeartbeat(dataDir); }, RUNNER_HEARTBEAT_MS);
+  if (heartbeatTimer.unref) heartbeatTimer.unref();
+  const cleanup = async () => {
+    clearInterval(heartbeatTimer);
+    try { await unlink(lockPath); } catch (e) { /* already gone */ }
+    try { await unlink(join(dataDir, RUNNER_HEARTBEAT_NAME)); } catch (e) { /* already gone */ }
+  };
   process.on('SIGINT', async () => { await cleanup(); process.exit(0); });
   process.on('SIGTERM', async () => { await cleanup(); process.exit(0); });
 
-  logLine('muse-runner started — polling ' + REPO + '/tasks/pending every ' + interval + 's (lock ' + lockPath + ')');
+  log('muse-runner started — polling ' + REPO + '/tasks/pending every ' + interval + 's (lock ' + lockPath + ', log ' + fileLogger.path + ')');
   let backoffUntil = 0;
   for (;;) {
     const now = Date.now();
@@ -510,10 +647,10 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
       continue;
     }
     try {
-      const res = await processOneTask({ github, bridge, log: logLine });
-      if (res.status === 'empty') logLine('poll: no pending tasks');
+      const res = await processOneTask({ github, bridge, log });
+      if (res.status === 'empty') log('poll: no pending tasks');
       else if (res.status === 'done' || res.status === 'failed' || res.status === 'already-resolved') {
-        logLine('task ' + res.id + ': ' + res.status
+        log('task ' + res.id + ': ' + res.status
           + (res.elapsedMs ? ' (' + res.elapsedMs + 'ms)' : '')
           + (res.adapterVersion ? ' — adapter v' + res.adapterVersion : '')
           + (res.error ? ' — ' + res.error : ''));
@@ -522,9 +659,9 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
     } catch (e) {
       if (e && e.retryAfterMs) {
         backoffUntil = Date.now() + e.retryAfterMs;
-        logLine('GitHub rate limit — backing off ' + Math.round(e.retryAfterMs / 1000) + 's: ' + e.message);
+        log('GitHub rate limit — backing off ' + Math.round(e.retryAfterMs / 1000) + 's: ' + e.message);
       } else {
-        logLine('poll error: ' + (e && e.message ? e.message : String(e)));
+        log('poll error: ' + (e && e.message ? e.message : String(e)));
       }
     }
     await sleep(interval * 1000);
