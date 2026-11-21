@@ -17,7 +17,7 @@
   // tab opened earlier still runs the OLD content script (Chrome does not
   // re-inject on extension reload), so the router reloads the tab once
   // when this version is stale or missing.
-  var CONTENT_VERSION = '0.3.4';
+  var CONTENT_VERSION = '0.3.5';
 
   function getAdapter() {
     if (adapter) return adapter;
