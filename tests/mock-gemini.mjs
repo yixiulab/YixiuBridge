@@ -27,11 +27,28 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
   const app = new FakeElement('div', { class: 'app' });
+
+  // Real page structure (v0.3.6, task -009): the sidebar conversation list
+  // uses a[data-test-id="conversation"] — the selector the 0.3.3–0.3.5
+  // adapter WRONGLY treated as the chat container. The sidebar links must
+  // come first in document order so a scope bug shows up in tests.
+  let sidebar = null;
+  if (realStructure) {
+    sidebar = new FakeElement('div', { class: 'sidebar' });
+    for (const title of ['黑洞的定义', '光合作用定义']) {
+      const link = new FakeElement('a', { 'data-test-id': 'conversation' });
+      const t = new FakeElement('span', { class: 'conversation-title' });
+      t.textContent = title;
+      link.appendChild(t);
+      sidebar.appendChild(link);
+    }
+    doc.body.appendChild(sidebar);
+  }
   doc.body.appendChild(app);
 
   // Model picker button (top of the page) + menu (present only while open).
@@ -173,8 +190,47 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   app.appendChild(send);
 
   // Conversation container + response element (created on send).
-  const convo = new FakeElement('div', { 'data-test-id': 'conversation' });
+  // Default shape: the mock's own div[data-test-id="conversation"].
+  // realStructure: the REAL Gemini page (Nov 2026, confirmed by
+  // independent DOM analyses Apr–Jul 2026 and by the -009 failure):
+  //   infinite-scroller.chat-history
+  //     div.conversation-container            // one per turn
+  //       user-query > .query-text > p.query-text-line
+  //       model-response
+  //         structured-content-container.model-response-text
+  //           > .markdown.markdown-main-panel
+  // plus one pre-existing turn, so the baseline is non-empty (as on the
+  // real -009 tab, which already held earlier pomodoro answers).
+  const convo = realStructure
+    ? new FakeElement('infinite-scroller', { class: 'chat-history' })
+    : new FakeElement('div', { 'data-test-id': 'conversation' });
   app.appendChild(convo);
+
+  function buildTurn(question, answer) {
+    const turn = new FakeElement('div', { class: 'conversation-container' });
+    const uq = new FakeElement('user-query');
+    const qt = new FakeElement('div', { class: 'query-text' });
+    const line = new FakeElement('p', { class: 'query-text-line' });
+    line.textContent = question;
+    qt.appendChild(line);
+    uq.appendChild(qt);
+    turn.appendChild(uq);
+    const mr = new FakeElement('model-response');
+    const scc = new FakeElement('structured-content-container', { class: 'model-response-text' });
+    const md = new FakeElement('div', { class: 'markdown markdown-main-panel' });
+    md.textContent = answer;
+    scc.appendChild(md);
+    mr.appendChild(scc);
+    turn.appendChild(mr);
+    return { turn, markdown: md };
+  }
+  // A home page has no turns at all; a conversation page (the default
+  // here) has one pre-existing turn, so the baseline is non-empty (as on
+  // the real -009 tab, which already held earlier pomodoro answers).
+  if (realStructure && priorTurn !== false) {
+    const old = buildTurn('用一句话解释什么是黑洞，回答里必须包含‘意大利面’这个词', '黑洞是宇宙中引力极强的时空区域，强到连光都无法逃脱，任何靠近它的物体都会被其巨大的潮汐力像拉扯意大利面一样拉长并吞噬。');
+    convo.appendChild(old.turn);
+  }
 
   let stopBtn = null;
   let responseEl = null;
@@ -184,8 +240,14 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   // which is what the adapter falls back to when no button is found.
   function startStreaming() {
     if (stopBtn) return; // already streaming
-    responseEl = new FakeElement('div', { class: 'model-response-text' });
-    convo.appendChild(responseEl);
+    if (realStructure) {
+      const fresh = buildTurn(box.textContent || '', '');
+      convo.appendChild(fresh.turn);
+      responseEl = fresh.markdown;
+    } else {
+      responseEl = new FakeElement('div', { class: 'model-response-text' });
+      convo.appendChild(responseEl);
+    }
     stopBtn = new FakeElement('button', { 'aria-label': 'Stop generating' });
     app.appendChild(stopBtn);
     let i = 0;
@@ -211,7 +273,7 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   }
 
   return {
-    doc, win, box, send, convo, picker,
+    doc, win, box, send, convo, picker, sidebar,
     get menu() { return menu; },
     get responseEl() { return responseEl; },
     get stopBtn() { return stopBtn; },
@@ -239,7 +301,7 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
 export const HOME_SCREEN_TEXT = '需要我为你做些什么？\n考考我莎士比亚的知识\n规划一条附近 3 英里的平坦慢跑路线\n总结会议记录';
 const HOME_SCREEN_TEXT_RERENDERED = '需要我为你做些什么？\n考考我莎士比亚的知识\n规划一条附近 3 英里的平坦慢跑路线\n总结会议记录\n再想一个点子';
 export function createMockGeminiHomePage(opts = {}) {
-  const page = createMockGeminiPage({ sendKind: 'icon-only', ...opts });
+  const page = createMockGeminiPage({ sendKind: 'icon-only', priorTurn: false, ...opts });
   const hero = new FakeElement('div', { class: 'home-greeting markdown' });
   hero.textContent = HOME_SCREEN_TEXT;
   const parent = opts.homeHeroInsideConvo ? page.convo : page.doc.body;
