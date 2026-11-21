@@ -12,6 +12,7 @@ import {
   checkForUpdate,
   compareSemver,
   getLocalVersion,
+  isStableRelease,
   planUpdate,
   applyUpdate,
   rollback,
@@ -271,4 +272,25 @@ test('applyUpdate keeps at most 2 backups', async () => {
   assert.equal(names.length, 2, 'expected 2 backups, got ' + names.join(','));
   for (const n of names) await rm(join(parent, n), { recursive: true, force: true });
   await rm(dir, { recursive: true, force: true });
+});
+
+const INDEX = JSON.stringify({
+  builds: [
+    { version: '0.3.7', channel: 'stable' },
+    { version: '0.4.0', channel: 'beta' },
+  ],
+});
+
+test('isStableRelease: only channel stable counts', async () => {
+  const fetchImpl = makeFetch({ pkgVersion: '0.4.0', files: { 'builds/builds.json': INDEX } });
+  assert.equal(await isStableRelease({ token: 'fake', version: '0.3.7', fetchImpl }), true);
+  assert.equal(await isStableRelease({ token: 'fake', version: '0.4.0', fetchImpl }), false);
+  assert.equal(await isStableRelease({ token: 'fake', version: '9.9.9', fetchImpl }), false);
+});
+
+test('isStableRelease: missing or broken index fails closed', async () => {
+  const missing = makeFetch({ pkgVersion: '0.4.0', files: {} });
+  assert.equal(await isStableRelease({ token: 'fake', version: '0.3.7', fetchImpl: missing }), false);
+  const broken = makeFetch({ pkgVersion: '0.4.0', files: { 'builds/builds.json': 'not json{' } });
+  assert.equal(await isStableRelease({ token: 'fake', version: '0.3.7', fetchImpl: broken }), false);
 });
