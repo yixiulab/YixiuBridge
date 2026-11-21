@@ -154,3 +154,15 @@ Muse（云端） --GET tasks/done/<id>.answer.json--> GitHub
 每个 Chrome 身份都装插件、都连同一个桥，各自上报 `{id, label}`（默认 `Profile-xxxxxx`，侧边栏可改别名）。每个工具的 `browser` 参数按 id / 别名 / 唯一子串匹配；不传就走第一个连上的。匹配到多个会报错让 AI 先问清楚。
 
 侧边栏显示的 Profile 别名（如 `Profile-akm8rx` → `Profile-trz39v`）是每个 Chrome 身份第一次装插件时随机生成的（`Profile-` + 6 位随机字符），存在该身份 `chrome.storage.local` 的 `yixiubridge.profile` 里；只有重装插件（存储被清）或换 Chrome 身份时才会变，不是生成 bug。一键更新脚本定位身份时从来不用这个别名，只用稳定的扩展 ID 和身份目录名。
+
+## 在线更新（v0.4.0）
+
+**模块**：`host/online-updater.mjs`（纯函数 + 注入的 fetch/exec/fs，全部可测）。`checkForUpdate` 读远端 `package.json` 比版本；`planUpdate` 拉 main 的 git tree、按本地文件 SHA 算出要改/要新增的清单（`extension/kernel/` 跳过——它是打包产物）；`applyUpdate` 逐文件下载并核对 git blob SHA、staging 目录里 `node --check` + JSON 校验、备份只备份被改的文件（最多留 2 个备份）、再逐文件原子替换；`rollback` 恢复备份并删掉本次新增的文件（Gemini 初稿漏了这一步：新增文件回滚后会残留，Muse 审出后修掉）；`isStableRelease` 查 `builds/builds.json`——只有 channel 是 `stable` 的版本才算稳定版，索引读不到就按“不稳定”处理（fail closed）。
+
+**runner 接入**：`runIdleOnlineUpdate`（`host/muse-runner.mjs`）。只在轮询结果是 `empty`（没有任何待处理任务）且距上次检查满 1 小时才跑；主循环是严格串行的，所以更新永远不可能和提问重叠，不需要互斥标志。流程：确认桥通且插件连着 → 查更新 → 是稳定版才继续 → plan + apply → `host/bridge-restart.mjs` 重启桥（Windows 上用 `netstat -ano` 找 LISTENING 在 :8765 的 PID，`tasklist` 确认是 `node.exe` 才 `taskkill`，再 detached 起新桥，60 秒内验 `/status` 的 version；非 Windows 只写文件不重启桥）→ 失败就 rollback 并拉起旧桥 → 改动里有 `host/muse-runner.mjs` 或 `kernel/shared/constants.js` 就先清锁和心跳、detached 拉起一个自己、`process.exit(0)`。每次检查和更新的结果写 `~/.yixiubridge/last-update.json`（checked_at、local/remoteVersion、updated、version、backupDir、error）。
+
+**搭建库**：`builds/builds.json`，每条一个版本（version、date、channel stable/beta、changes、verified_by_muse）。0.4.0 先标 `beta`，真机验证通过后由 Muse 改成 `stable`，之后 runner 才会自动装它。
+
+**一键启动**：`scripts/update-and-start.ps1` 第 3 步优先走在线更新（`scripts/online-update-cli.mjs`，退出码 0 算成功；CLI 是用户手动跑的，所以不限制 channel，beta 也装）；在线更新失败或模块不存在时退回整包 ZIP 下载。`$downloaded` 为真时自我更新交接照常跑（新版脚本接管）。
+
+**Gemini 写稿的两个教训（040-001/040-003）**：(1) 回稿在传输里丢了模板字符串的反引号（`` ` ``）和块注释的 `/*` 开头——`const portSuffix = :${port};`、`['/FI', PID eq ${pid}, ...]`、`log(在线更新...${msg})` 这样直接粘贴是语法错误，接入时必须逐行补回，`node --check` 是最后一道关；(2) 040-003 的 runner 接入稿有 4 处逻辑错：`Boolean(processOneTask(...))` 恒为真（它返回对象，空闲是 `res.status === 'empty'`）、`hasPendingTasks` 读的是本地根本不存在的 `tasks/pending` 目录、`loadConfig` 忘加 `await`、清理函数引用了不存在的 `loopTimer`/`lockFile`——Muse 按真实代码重写了接入层，没照抄。
