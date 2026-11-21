@@ -85,7 +85,7 @@ test('read_page on a Chrome internal page does not attach anything', async () =>
 
 // ---------- list_models / ask_gemini model routing ----------
 
-function makeGeminiRouter({ sendMessageImpl }) {
+function makeGeminiRouter({ sendMessageImpl, pingTimeoutMs }) {
   const tab = { id: 7, title: 'Gemini', url: 'https://gemini.google.com/app', active: true, status: 'complete' };
   const reloads = [];
   const fakeChrome = {
@@ -103,6 +103,7 @@ function makeGeminiRouter({ sendMessageImpl }) {
     debugger: { snapshot: async () => ({}) },
     profile: { id: 'Profile-test', label: 'test' },
     version: '0.2.0-test',
+    pingTimeoutMs,
   });
   router._testReloads = reloads;
   return router;
@@ -118,7 +119,7 @@ test('list_models reaches the Gemini content script and returns its result', asy
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
       seen.push(msg);
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
       if (msg.tool === 'list_models') return { ok: true, result: modelsResult };
       throw new Error('unexpected tool ' + msg.tool);
     },
@@ -132,7 +133,7 @@ test('list_models reaches the Gemini content script and returns its result', asy
 test('list_models reports a clear error when the content script fails', async () => {
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
       if (msg.tool === 'list_models') return { ok: false, error: 'gemini model picker button not found' };
       throw new Error('unexpected tool ' + msg.tool);
     },
@@ -147,7 +148,7 @@ test('ask_gemini passes model and thinking through to the content script', async
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
       seen.push(msg);
-      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test' };
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
       if (msg.tool === 'ask_gemini') {
         // Simulate the content script finishing immediately.
         setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10 }), 5);
@@ -177,7 +178,7 @@ test('stale content script (pre-update, no version) reloads the tab once, then p
         // re-inject content scripts on extension reload). After the tab
         // reload it reports the current version.
         if (pings === 1) return { ok: true, page: 'gemini' };
-        return { ok: true, page: 'gemini', version: '0.2.0-test' };
+        return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
       }
       if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [] } };
       throw new Error('unexpected tool ' + msg.tool);
@@ -202,4 +203,139 @@ test('content script still stale after a tab reload fails with a clear error', a
   assert.match(res.error, /still an old version/);
   assert.match(res.error, /0\.2\.0-test/);
   assert.deepEqual(router._testReloads, [7], 'tab is reloaded once before giving up');
+});
+
+// ---------- version self-check (v0.3.1) ----------
+// Background: task -003 (2026-11-21) failed with the 0.2.0 send-button
+// error while the panel showed 0.3.0 — the Gemini tab ran the old adapter
+// and nothing said so. The ping handshake now checks the adapter version
+// too, and every result/error carries it.
+
+test('stale adapter version (content script current, adapter old) reloads the tab once, then proceeds', async () => {
+  let pings = 0;
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') {
+        pings++;
+        // The content script is current but the adapter file in this tab
+        // is still the old one — the two files can diverge after an
+        // extension update, and only the adapter version catches it.
+        if (pings === 1) return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.1.0' };
+        return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      }
+      if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [], adapter_version: '0.2.0-test' } };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.current, 'Neon');
+  assert.equal(pings, 2, 'ping must be retried after the reload');
+  assert.deepEqual(router._testReloads, [7], 'tab must be reloaded exactly once');
+});
+
+test('content script that answers without a ping handler is stale, reloads once, then proceeds', async () => {
+  let pings = 0;
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') {
+        pings++;
+        // Pre-0.3.0 content script: alive, but answers {ok:false} to the
+        // unknown ping tool instead of a version. Reload fixes it.
+        if (pings === 1) return { ok: false, error: 'unknown tool for gemini content script: ping' };
+        return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      }
+      if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [] } };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.deepEqual(router._testReloads, [7], 'tab must be reloaded exactly once');
+});
+
+test('content script that never answers reloads the tab once, then proceeds', async () => {
+  let pings = 0;
+  const router = makeGeminiRouter({
+    pingTimeoutMs: 50,
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') {
+        pings++;
+        // Orphaned script after an extension reload: the tab never
+        // answers at all (Chrome drops the old context). A tab reload
+        // injects the current scripts. (pingTimeoutMs is tiny here, so
+        // each _pingContentScript call makes exactly one attempt: the
+        // first call fails, the reload happens, the second answers.)
+        if (pings <= 1) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      }
+      if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [] } };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.deepEqual(router._testReloads, [7], 'tab must be reloaded exactly once');
+});
+
+test('content script still silent after a reload fails with a clear error', async () => {
+  const router = makeGeminiRouter({
+    pingTimeoutMs: 50,
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') throw new Error('Could not establish connection. Receiving end does not exist.');
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not answer even after reloading/);
+  assert.deepEqual(router._testReloads, [7], 'tab is reloaded once before giving up — never in a loop');
+});
+
+test('ask_gemini success result carries adapter_version through', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'ask_gemini') {
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10, adapter_version: '0.2.0-test' }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', timeout_s: 30 } });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.answer, 'hi');
+  assert.equal(res.result.adapter_version, '0.2.0-test');
+});
+
+test('ask_gemini failure names the adapter version in the error', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'ask_gemini') {
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: false, error: 'gemini send button not found — UI may have changed', adapter_version: '0.1.0' }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', timeout_s: 30 } });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /send button not found/);
+  assert.match(res.error, /\[adapter_version: 0\.1\.0\]/, 'the stale version must be visible in the error text itself');
+});
+
+test('list_models error names the adapter version in the error', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'list_models') return { ok: false, error: 'gemini model picker button not found', adapter_version: '0.2.0-test' };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /model picker button not found/);
+  assert.match(res.error, /\[adapter_version: 0\.2\.0-test\]/);
 });
