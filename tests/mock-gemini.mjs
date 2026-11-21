@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -138,7 +138,9 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   // classic/fallback shapes the adapter must also find:
   //   'aria-label' classic button, 'fonticon' icon with fonticon only,
   //   'title' button labelled by title, 'testid' data-test-id button,
-  //   'svg' inline SVG arrow icon, 'role' div acting as a button.
+  //   'svg' inline SVG arrow icon, 'role' div acting as a button,
+  //   'icon-only' bare icon inside a plain div — the -005 shape (the blue
+  //   arrow is visible but is NOT a <button>, so no layer can find it).
   let send;
   if (sendKind === 'aria-label') {
     send = new FakeElement('button', { 'aria-label': 'Send message' });
@@ -157,6 +159,11 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     send.appendChild(svg);
   } else if (sendKind === 'role') {
     send = new FakeElement('div', { role: 'button', 'aria-label': '发送' });
+  } else if (sendKind === 'icon-only') {
+    send = new FakeElement('div', { class: 'send-wrap' });
+    const icon = new FakeElement('mat-icon', { 'data-mat-icon-name': 'arrow_upward', fonticon: 'arrow_upward', 'aria-hidden': 'true' });
+    icon.textContent = 'arrow_upward';
+    send.appendChild(icon);
   } else { // 'mat-icon' (default, real page shape)
     send = new FakeElement('button', { class: 'mat-mdc-icon-button' });
     const icon = new FakeElement('mat-icon', { 'data-mat-icon-name': 'arrow_upward', fonticon: 'arrow_upward', 'aria-hidden': 'true' });
@@ -172,7 +179,11 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   let stopBtn = null;
   let responseEl = null;
 
-  send.addEventListener('click', () => {
+  // Shared by the send-button click and (when sendOnEnter is set) an Enter
+  // keydown on the prompt box — the real Gemini page submits on Enter too,
+  // which is what the adapter falls back to when no button is found.
+  function startStreaming() {
+    if (stopBtn) return; // already streaming
     responseEl = new FakeElement('div', { class: 'model-response-text' });
     convo.appendChild(responseEl);
     stopBtn = new FakeElement('button', { 'aria-label': 'Stop generating' });
@@ -189,7 +200,15 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
       }
     };
     setTimeout(step, chunkMs);
-  });
+  }
+
+  send.addEventListener('click', () => { startStreaming(); });
+
+  if (sendOnEnter) {
+    box.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') startStreaming();
+    });
+  }
 
   return {
     doc, win, box, send, convo, picker,
