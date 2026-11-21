@@ -12,6 +12,13 @@
 
   var adapter = null;
 
+  // Content-script version. The service worker compares this with the
+  // running extension version: after the extension is updated, a Gemini
+  // tab opened earlier still runs the OLD content script (Chrome does not
+  // re-inject on extension reload), so the router reloads the tab once
+  // when this version is stale or missing.
+  var CONTENT_VERSION = '0.3.0';
+
   function getAdapter() {
     if (adapter) return adapter;
     var factory = (typeof window !== 'undefined' && window.YixiuBridgeGeminiAdapter)
@@ -36,7 +43,7 @@
     if (!msg || msg.from !== 'yixiubridge-sw') return false;
 
     if (msg.tool === 'ping') {
-      sendResponse({ ok: true, page: 'gemini', url: location.href });
+      sendResponse({ ok: true, page: 'gemini', url: location.href, version: CONTENT_VERSION });
       return false;
     }
 
@@ -101,5 +108,5 @@
   });
 
   // Debug handle (page context only, no data leaves the browser).
-  window.__YixiuBridge = { version: '0.2.0', page: 'gemini' };
+  window.__YixiuBridge = { version: CONTENT_VERSION, page: 'gemini' };
 })();
