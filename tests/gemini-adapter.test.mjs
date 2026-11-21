@@ -10,7 +10,7 @@ import { FakeDocument, FakeElement } from './fake-dom.mjs';
 const require = createRequire(import.meta.url);
 const Adapter = require('../kernel/adapters/gemini-web.js');
 
-const FAST = { pollMs: 20, stableMs: 40 };
+const FAST = { pollMs: 20, stableMs: 40, sendCheckMs: 10 };
 
 test('ask fills the prompt box, sends, waits for streaming to end, returns the full answer', async () => {
   const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10 });
@@ -101,4 +101,32 @@ test('filling a contenteditable box dispatches an input event', async () => {
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   await adapter.ask('event test');
   assert.equal(inputEvents, 1);
+});
+
+test('click that does not submit falls back to Enter and still succeeds', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10 });
+  // The send button's click does nothing on this page variant...
+  const origClicks = (page.send._listeners.click || []).slice();
+  page.send._listeners.click = [];
+  // ...but Enter in the prompt box submits.
+  page.box.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') origClicks.forEach((fn) => fn.call(page.send));
+  });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, '4 is the answer.');
+});
+
+test('click and Enter both failing returns a fast, clear error instead of timing out', async () => {
+  const page = createMockGeminiPage();
+  // Neither the button nor Enter submits anything on this page variant.
+  page.send._listeners.click = [];
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 60000 });
+  const started = Date.now();
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not register/);
+  assert.match(res.error, /still in the input box/);
+  assert.ok(Date.now() - started < 5000, 'should fail fast, not wait out the 60s timeout');
 });
