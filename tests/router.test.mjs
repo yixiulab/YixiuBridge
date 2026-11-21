@@ -9,7 +9,8 @@ import vm from 'node:vm';
 
 function loadRouter(fakeChrome) {
   const src = fs.readFileSync(new URL('../extension/background/router.js', import.meta.url), 'utf8');
-  const ctx = vm.createContext({ chrome: fakeChrome });
+  // The router uses host timers (setTimeout in _waitForTask); pass them in.
+  const ctx = vm.createContext({ chrome: fakeChrome, setTimeout, clearTimeout });
   vm.runInContext(src, ctx);
   return ctx.YixiuBridgeRouter;
 }
@@ -80,4 +81,84 @@ test('read_page on a Chrome internal page does not attach anything', async () =>
   assert.match(res.result.note, /cannot be read/);
   assert.equal(sendMessageCalled, false);
   assert.deepEqual(debuggerCalls, []);
+});
+
+// ---------- list_models / ask_gemini model routing ----------
+
+function makeGeminiRouter({ sendMessageImpl }) {
+  const tab = { id: 7, title: 'Gemini', url: 'https://gemini.google.com/app', active: true, status: 'complete' };
+  const fakeChrome = {
+    tabs: {
+      query: async () => [tab],
+      get: async () => tab,
+      create: async () => tab,
+      sendMessage: (tabId, msg) => sendMessageImpl(tabId, msg),
+    },
+  };
+  const Router = loadRouter(fakeChrome);
+  const router = new Router({
+    bridge: { sendTaskUpdate: async () => {} },
+    debugger: { snapshot: async () => ({}) },
+    profile: { id: 'Profile-test', label: 'test' },
+    version: '0.2.0-test',
+  });
+  return router;
+}
+
+test('list_models reaches the Gemini content script and returns its result', async () => {
+  const modelsResult = {
+    current: 'Neon',
+    buttonText: 'Neon 高',
+    models: [{ label: '更深入的分析', codename: 'Neon', description: '', selected: true, locked: false }],
+  };
+  const seen = [];
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      seen.push(msg);
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'list_models') return { ok: true, result: modelsResult };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.result, modelsResult);
+  assert.equal(seen.some((m) => m.tool === 'list_models'), true);
+});
+
+test('list_models reports a clear error when the content script fails', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'list_models') return { ok: false, error: 'gemini model picker button not found' };
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /model picker button not found/);
+});
+
+test('ask_gemini passes model and thinking through to the content script', async () => {
+  const seen = [];
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      seen.push(msg);
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini' };
+      if (msg.tool === 'ask_gemini') {
+        // Simulate the content script finishing immediately.
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10 }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', model: 'Neon', thinking: '高', timeout_s: 30 } });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.answer, 'hi');
+  assert.equal(res.result.model, 'Neon');
+  const askMsg = seen.find((m) => m.tool === 'ask_gemini');
+  assert.equal(askMsg.params.model, 'Neon');
+  assert.equal(askMsg.params.thinking, '高');
+  assert.equal(askMsg.params.prompt, 'hello');
 });
