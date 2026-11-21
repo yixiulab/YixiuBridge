@@ -1,0 +1,9 @@
+{
+  "id": "task-20261121-bridge-041-verify2",
+  "error": "ask_gemini failed: ask_gemini: gemini thinking level did not stick — picker still shows \"Neon\" after choosing level \"高\" [adapter_version: 0.4.1]",
+  "adapter_version": "0.4.1",
+  "bridge_version": "0.4.1",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-21T21:47:23.870Z"
+}
