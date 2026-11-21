@@ -28,10 +28,22 @@
 // Needs: bridge running, extension loaded, github_token saved.
 import { appendFile, chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import C from '../kernel/shared/constants.js';
+import {
+  checkForUpdate,
+  planUpdate,
+  applyUpdate,
+  rollback,
+  isStableRelease,
+} from './online-updater.mjs';
+import {
+  restartBridge,
+  startBridgeDetached,
+  waitForBridgeReady,
+} from './bridge-restart.mjs';
 
 export const REPO = 'yixiulab/YixiuBridge';
 export const GITHUB_API = 'https://api.github.com';
@@ -808,6 +820,172 @@ export async function acquireLock(dataDir, log = logLine) {
   }
 }
 
+// ---------- idle online update (v0.4.0) ----------
+// When the runner is idle (a poll found no pending task), it checks once
+// an hour whether a newer STABLE release is on GitHub main, pulls only
+// the changed files, restarts the bridge, and restarts itself when its
+// own files changed. The loop in runRunner is strictly sequential, so an
+// update can never overlap a task ask — no mutex flags are needed.
+// A failed update never loses a task: the pending file stays put and the
+// next poll retries the task; a failed bridge restart rolls the files
+// back and brings the old bridge up again.
+// (Drafted by Gemini via the bridge as task 040-003, then reviewed and
+// rewritten by Muse: the draft's processOneTask check was always true,
+// its pending-tasks check read a local dir that never exists, it forgot
+// to await loadConfig, and it invented timer/lock variable names that
+// do not exist in runRunner.)
+
+export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+export const RUNNER_SELF_RESTART_FILES = new Set([
+  'host/muse-runner.mjs',
+  'kernel/shared/constants.js',
+]);
+
+// Writes ~/.yixiubridge/last-update.json. Failures are swallowed on
+// purpose: a status-file write must never break the polling loop.
+export async function writeLastUpdateRecord(dataDir, record, { writeFile: writeFileImpl = writeFile } = {}) {
+  const payload = {
+    checked_at: new Date().toISOString(),
+    localVersion: record.localVersion ?? null,
+    remoteVersion: record.remoteVersion ?? null,
+    updated: Boolean(record.updated),
+    version: record.version ?? null,
+    backupDir: record.backupDir ?? null,
+    error: record.error ?? null,
+  };
+  try {
+    await mkdir(dataDir, { recursive: true });
+    await writeFileImpl(join(dataDir, 'last-update.json'), JSON.stringify(payload, null, 2) + '\n', 'utf8');
+  } catch (e) { /* status file is best-effort only */ }
+}
+
+export function needsRunnerSelfRestart(applyResult) {
+  const changed = [...(applyResult?.updated || []), ...(applyResult?.added || [])];
+  return changed.some((relPath) => RUNNER_SELF_RESTART_FILES.has(String(relPath).replace(/\\/g, '/')));
+}
+
+// Respawns this runner detached (same argv), then the caller exits.
+// Injected in tests so the real process never forks during a test run.
+export function spawnDetachedSelf({ spawnImpl = spawn } = {}) {
+  const child = spawnImpl(process.execPath, process.argv.slice(1), {
+    cwd: process.cwd(),
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  if (child && typeof child.unref === 'function') child.unref();
+  return child && child.pid ? child.pid : null;
+}
+
+// One idle update cycle. `updater` / `restarter` / `spawnSelf` are
+// injectable so tests can drive the whole flow without a real bridge,
+// GitHub, or process exit.
+export async function runIdleOnlineUpdate({
+  dataDir,
+  installDir,
+  bridge,
+  log = () => {},
+  updater = { checkForUpdate, planUpdate, applyUpdate, rollback, isStableRelease },
+  restarter = { restartBridge, startBridgeDetached, waitForBridgeReady },
+  cleanupBeforeExit = null,
+  spawnSelf = spawnDetachedSelf,
+} = {}) {
+  const cfg = await loadConfig(dataDir);
+  const token = cfg.github_token;
+  if (!token) return { checked: false };
+  let status;
+  try {
+    status = await bridge.status();
+  } catch (e) {
+    log('在线更新跳过：无法获取桥状态（' + (e && e.message ? e.message : String(e)) + '）');
+    return { checked: false };
+  }
+  if (!status || !status.up || status.extensions === 0) {
+    log('在线更新跳过：桥未就绪或插件未连接');
+    return { checked: false };
+  }
+  let checkRes;
+  try {
+    checkRes = await updater.checkForUpdate({ token, installDir });
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    log('在线更新检查失败：' + msg);
+    await writeLastUpdateRecord(dataDir, { error: msg });
+    return { checked: true, updated: false };
+  }
+  const localVersion = checkRes.localVersion ?? status.diskVersion ?? status.version ?? null;
+  const remoteVersion = checkRes.remoteVersion ?? null;
+  if (!checkRes.updateAvailable) {
+    log('在线更新检查完成：已是最新版本' + (localVersion ? ' ' + localVersion : ''));
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion });
+    return { checked: true, updated: false };
+  }
+  // Only install releases listed as stable in builds/builds.json.
+  let stable = false;
+  try {
+    stable = await updater.isStableRelease({ token, version: remoteVersion });
+  } catch (e) {
+    log('在线更新跳过：读不到搭建库索引（' + (e && e.message ? e.message : String(e)) + '）');
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion, error: 'builds index unreadable' });
+    return { checked: true, updated: false };
+  }
+  if (!stable) {
+    log('在线更新跳过：新版本 ' + remoteVersion + ' 还不是稳定版，等验证通过再升');
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion });
+    return { checked: true, updated: false };
+  }
+  log('发现稳定新版本 ' + remoteVersion + '（当前 ' + localVersion + '），开始更新');
+  let applyRes;
+  try {
+    await updater.planUpdate({ token, installDir });
+    const stagingDir = join(dirname(installDir), '.yixiubridge-update-staging');
+    applyRes = await updater.applyUpdate({ token, installDir, stagingDir });
+  } catch (e) {
+    const msg = e && e.message ? e.message : String(e);
+    log('在线更新应用失败（文件未改动）：' + msg);
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion, error: msg });
+    return { checked: true, updated: false };
+  }
+  const targetVersion = applyRes.version || remoteVersion;
+  let restartRes;
+  try {
+    restartRes = await restarter.restartBridge({ installDir, expectedVersion: targetVersion, timeoutMs: 60000 });
+  } catch (e) {
+    restartRes = { ok: false, skipped: false, error: e && e.message ? e.message : String(e) };
+  }
+  if (restartRes.skipped) {
+    log('在线更新已写入 ' + targetVersion + '（' + restartRes.reason + '，不自动重启桥）');
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: true, version: targetVersion, backupDir: applyRes.backupDir });
+  } else if (!restartRes.ok) {
+    const errMsg = '新桥启动验证失败：' + restartRes.error;
+    log('在线更新回滚：' + errMsg);
+    try {
+      await updater.rollback({ installDir, backupDir: applyRes.backupDir, addedFiles: applyRes.added || [] });
+      restarter.startBridgeDetached(installDir);
+      const oldReady = await restarter.waitForBridgeReady({ timeoutMs: 30000 });
+      if (oldReady.ok) {
+        log('在线更新回滚完成：旧桥已恢复运行（' + (oldReady.status && oldReady.status.version ? oldReady.status.version : localVersion) + '）');
+      } else {
+        log('在线更新回滚警告：旧桥拉起后未在 30 秒内就绪（' + oldReady.error + '）');
+      }
+    } catch (rbErr) {
+      log('在线更新回滚异常：' + (rbErr && rbErr.message ? rbErr.message : String(rbErr)));
+    }
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion, backupDir: applyRes.backupDir, error: errMsg });
+    return { checked: true, updated: false };
+  } else {
+    log('在线更新成功：已升级至 ' + targetVersion + ' 并重启桥');
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: true, version: targetVersion, backupDir: applyRes.backupDir });
+  }
+  if (needsRunnerSelfRestart(applyRes)) {
+    log('检测到 runner 核心文件已更新，正在释放锁并重启 runner');
+    if (cleanupBeforeExit) await cleanupBeforeExit();
+    spawnSelf();
+    process.exit(0);
+  }
+  return { checked: true, updated: true };
+}
+
 export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchImpl = fetch, bridgeUrl = C.BRIDGE_URL } = {}) {
   const cfg = await loadConfig(dataDir);
   if (!cfg.github_token) {
@@ -825,6 +1003,9 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
   // v0.3.7: the runner opens Chrome itself when a task is waiting and no
   // extension is connected (see createChromeOpener).
   const chromeOpener = createChromeOpener({ dataDir });
+  // v0.4.0: online self-update. The install dir is the parent of host/.
+  const installDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  let lastUpdateCheckAt = 0;
   const lockPath = await acquireLock(dataDir, log);
   // Heartbeat (v0.3.4): proves this runner is alive. A later runner that
   // finds a stale lock uses it to tell a live runner from a dead one.
@@ -857,6 +1038,17 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
           + (res.error ? ' — ' + res.error : ''));
       }
       // bridge-down / no-extension / busy: already logged inside processOneTask.
+      // Idle online update (v0.4.0): only when this poll found no pending
+      // task at all, and at most once an hour. The loop is strictly
+      // sequential, so an update can never overlap a task ask.
+      if (res.status === 'empty' && Date.now() - lastUpdateCheckAt >= UPDATE_CHECK_INTERVAL_MS) {
+        try {
+          const upd = await runIdleOnlineUpdate({ dataDir, installDir, bridge, log, cleanupBeforeExit: cleanup });
+          if (upd.checked) lastUpdateCheckAt = Date.now();
+        } catch (e) {
+          log('在线更新异常：' + (e && e.message ? e.message : String(e)));
+        }
+      }
     } catch (e) {
       if (e && e.retryAfterMs) {
         backoffUntil = Date.now() + e.retryAfterMs;
