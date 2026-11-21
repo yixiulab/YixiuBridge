@@ -37,7 +37,7 @@ test('shouldAutoReload never loops on a version it already reloaded for', () => 
 });
 
 test('constants carry the current version', () => {
-  assert.equal(C.EXTENSION_VERSION, '0.3.2');
+  assert.equal(C.EXTENSION_VERSION, '0.3.3');
 });
 
 // --- Chrome profile discovery (v0.3.1 fix) ---
@@ -68,13 +68,26 @@ test('profileHasExtension accepts either evidence signal', () => {
   assert.equal(D.profileHasExtension({}), false);
 });
 
-// --- Preferences evidence (v0.3.2 fix) ---
-// Ground truth 2026-11-21: Profile 21's Secure Preferences has no trace
-// of the extension ID, yet the extension is loaded there — Chrome records
-// an unpacked (developer-mode) extension under extensions.settings.<id>
-// (location 4 + path) in the regular Preferences file, not in Secure
-// Preferences. The 0.3.1 scan only looked at Secure Preferences and
-// matched 0 of 72 profiles. Preferences text is now the primary signal.
+// --- Evidence order (v0.3.3 fix — the 0.3.2 claim was WRONG) ---
+// 0.3.2 said Chrome records unpacked extensions in the regular Preferences
+// file (extensions.settings.<id>, location 4 + path) and NOT in Secure
+// Preferences, citing Profile 21's Secure Preferences search. That was a
+// misreading: Chrome records extension installs in Secure Preferences;
+// the user's real Profile 21 Preferences file (90 KB JSON, read directly
+// 2026-11-21) has NO extensions.settings key at all and the ID appears 0
+// times. Secure Preferences is the primary signal again; Local Extension
+// Settings is the backup; Preferences is a WEAK signal kept only for
+// Chromium-based browsers that record extensions there. And the 0.3.1
+// scan matching 0 of 72 profiles is now SOLVED: it was not a file or
+// evidence problem at all — every scan searched for a 33-character ID
+// (alcjfcjfkfhfacgofhgoenljfenbcgcel, an extra 'f' misread from a
+// chrome://extensions screenshot), and a real Chrome extension ID is
+// always exactly 32 characters. The user's real Profile 21 Secure
+// Preferences file (read directly 2026-11-21) DOES contain the record
+// under the correct ID alcjfcjfkhfacgofhgoenljfenbcgcel (location 4,
+// path C:\software\myself\YixiuBridge-main\extension). The 0.3.3 scan
+// still prints Secure Preferences readability counts, so a future
+// 0-match run is diagnosable from the output alone.
 
 function prefsWithExtension(id, extra) {
   const entry = Object.assign({ location: 4, path: 'C:\\software\\myself\\YixiuBridge-main\\extension' }, extra || {});
@@ -83,25 +96,59 @@ function prefsWithExtension(id, extra) {
   return JSON.stringify({ extensions: { settings: settings } });
 }
 
-test('profileHasExtension matches an unpacked extension via Preferences text', () => {
+test('profileHasExtension matches via Secure Preferences (primary) and still via Preferences (weak fallback)', () => {
   const id = D.EXTENSION_ID;
-  assert.equal(D.profileHasExtension({ prefsText: prefsWithExtension(id), securePrefsText: '{}', localExtSettingsExists: false }), true, 'ID in Preferences only — Secure Preferences has no trace of it');
+  assert.equal(D.profileHasExtension({ prefsText: '{}', securePrefsText: prefsWithExtension(id), localExtSettingsExists: false }), true, 'ID in Secure Preferences only — the Chrome case');
+  assert.equal(D.profileHasExtension({ prefsText: prefsWithExtension(id), securePrefsText: '{}', localExtSettingsExists: false }), true, 'ID in Preferences only — weak signal for Chromium-based browsers');
   assert.equal(D.profileHasExtension({ prefsText: prefsWithExtension('otherid0000000000000000000000'), securePrefsText: '{}', localExtSettingsExists: false }), false, 'a different ID in Preferences is not a match');
   assert.equal(D.profileHasExtension({ prefsText: '{}', securePrefsText: '{}', localExtSettingsExists: false }), false, 'ID in neither file');
   assert.equal(D.profileHasExtension({ prefsText: null, securePrefsText: null, localExtSettingsExists: false }), false, 'both files unreadable');
 });
 
-test('matchedEvidence lists every signal that fired, in priority order', () => {
+test('matchedEvidence lists every signal that fired, in priority order (Secure Preferences first)', () => {
   const id = D.EXTENSION_ID;
   assert.deepEqual(D.matchedEvidence({ prefsText: prefsWithExtension(id), securePrefsText: '"...' + id + '..."', localExtSettingsExists: true }),
-    ['Preferences', 'Secure Preferences', 'Local Extension Settings'], 'all three');
+    ['Secure Preferences', 'Local Extension Settings', 'Preferences'], 'all three');
+  assert.deepEqual(D.matchedEvidence({ prefsText: '{}', securePrefsText: '"...' + id + '..."', localExtSettingsExists: false }),
+    ['Secure Preferences'], 'Secure Preferences only — the Chrome case');
   assert.deepEqual(D.matchedEvidence({ prefsText: prefsWithExtension(id), securePrefsText: '{}', localExtSettingsExists: false }),
-    ['Preferences'], 'Preferences only — the unpacked-extension case');
+    ['Preferences'], 'Preferences only — the weak fallback case');
   assert.deepEqual(D.matchedEvidence({ prefsText: '{}', securePrefsText: '{}', localExtSettingsExists: false }), [], 'none');
   assert.deepEqual(D.matchedEvidence(null), [], 'no evidence object');
 });
 
-test('extensionPathFromPrefs reads the loaded folder from Preferences JSON', () => {
+test('EXTENSION_ID is a valid Chrome extension ID: exactly 32 chars, a-p only (regression guard for the 33-char typo)', () => {
+  assert.equal(typeof D.EXTENSION_ID, 'string');
+  assert.equal(D.EXTENSION_ID.length, 32, 'a Chrome extension ID is always exactly 32 characters — the 0.3.1/0.3.2 scans searched a 33-char typo and matched 0/72');
+  assert.match(D.EXTENSION_ID, /^[a-p]{32}$/, 'Chrome extension IDs use only lowercase a-p');
+  assert.equal(D.EXTENSION_ID, 'alcjfcjfkhfacgofhgoenljfenbcgcel', "the real ID from the user's Profile 21 Secure Preferences file (2026-11-21)");
+});
+
+test('the real Profile 21 Secure Preferences record matches (location 4, path = install dir) — the 0/72 case', () => {
+  const id = D.EXTENSION_ID;
+  // The real record from the user's Profile 21 Secure Preferences file
+  // (read directly 2026-11-21): extensions.settings.<id> with location 4
+  // and path C:\software\myself\YixiuBridge-main\extension (the updater's
+  // install dir + extension). prefsWithExtension builds exactly that
+  // shape (location 4 + path).
+  const secureText = prefsWithExtension(id);
+  assert.equal(D.profileHasExtension({ prefsText: '{}', securePrefsText: secureText, localExtSettingsExists: false }), true);
+  assert.deepEqual(D.matchedEvidence({ prefsText: '{}', securePrefsText: secureText, localExtSettingsExists: false }), ['Secure Preferences']);
+  const expectedPath = JSON.parse(secureText).extensions.settings[id].path;
+  assert.equal(D.extensionPathFromPrefs(secureText), expectedPath, 'the loaded path is extracted from the Secure Preferences record');
+  assert.ok(expectedPath.indexOf('YixiuBridge-main') !== -1 && expectedPath.endsWith('extension'), 'the loaded path equals the updater install dir — no path-mismatch warning should fire');
+});
+
+test('a file containing only the old 33-char typo ID does NOT match (the 0/72 regression)', () => {
+  const typoId = 'alcjfcjfkfhfacgofhgoenljfenbcgcel'; // 33 chars, extra 'f' — misread from a screenshot
+  assert.equal(typoId.length, 33);
+  const secureText = prefsWithExtension(typoId);
+  assert.equal(D.profileHasExtension({ prefsText: '{}', securePrefsText: secureText, localExtSettingsExists: false }), false, 'the typo ID must never match the real constant');
+  assert.deepEqual(D.matchedEvidence({ prefsText: '{}', securePrefsText: secureText, localExtSettingsExists: false }), []);
+  assert.equal(D.extensionPathFromPrefs(secureText), null);
+});
+
+test('extensionPathFromPrefs reads the loaded folder from preferences-format JSON (Secure Preferences text or Preferences text — same schema)', () => {
   const id = D.EXTENSION_ID;
   assert.equal(D.extensionPathFromPrefs(prefsWithExtension(id)), 'C:\\software\\myself\\YixiuBridge-main\\extension');
   assert.equal(D.extensionPathFromPrefs(prefsWithExtension(id, { path: undefined })), null, 'entry without a path');
