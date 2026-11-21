@@ -9,6 +9,7 @@ import {
   taskFilePaths,
   logFilePath,
   buildLogEntry,
+  adapterVersionFromError,
   createGitHubClient,
   createBridgeCaller,
   processOneTask,
@@ -72,19 +73,20 @@ function taskJson(id, prompt, extra = {}) {
   return JSON.stringify({ id, prompt, created_by: 'muse', created_at: '2026-11-21T10:00:00.000Z', ...extra });
 }
 
-function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, statusUp = true, extensions = 1 } = {}) {
+function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1' } = {}) {
   const calls = [];
   return {
     calls,
-    async status() { calls.push({ op: 'status' }); return { up: statusUp, extensions }; },
+    async status() { calls.push({ op: 'status' }); return { up: statusUp, extensions, version, diskVersion }; },
     async ask(args) {
       calls.push({ op: 'ask', ...args });
       if (failWith) {
         const e = new Error(failWith);
         if (failCode) e.code = failCode;
+        if (failAdapterVersion) e.adapterVersion = failAdapterVersion;
         throw e;
       }
-      return { answer, model: 'Neon', elapsedMs: 1234 };
+      return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion };
     },
   };
 }
@@ -124,6 +126,7 @@ test('buildLogEntry truncates long prompts and carries status + models', () => {
   const e = buildLogEntry({
     task: { id: 't1', prompt: 'x'.repeat(300) },
     status: 'done', elapsedMs: 6500, askedModel: 'Neon', answeredModel: 'Neon',
+    adapterVersion: '0.3.1', bridgeVersion: '0.3.1',
   });
   assert.equal(e.id, 't1');
   assert.equal(e.status, 'done');
@@ -131,6 +134,8 @@ test('buildLogEntry truncates long prompts and carries status + models', () => {
   assert.equal(e.asked_model, 'Neon');
   assert.equal(e.elapsed_ms, 6500);
   assert.equal(e.error, null);
+  assert.equal(e.adapter_version, '0.3.1');
+  assert.equal(e.bridge_version, '0.3.1');
   assert.ok(e.at);
 });
 
@@ -156,6 +161,10 @@ test('happy path: oldest task answered, done file written, pending deleted, log 
   assert.equal(done.asked_model, 'Neon');
   assert.equal(done.answered_model, 'Neon');
   assert.ok(done.answered_at);
+  assert.equal(done.adapter_version, '0.3.1', 'done file records the adapter version that answered');
+  assert.equal(done.bridge_version, '0.3.1');
+  assert.equal(res.adapterVersion, '0.3.1');
+  assert.equal(res.bridgeVersion, '0.3.1');
   assert.equal(gh.files.has('tasks/pending/t-old.json'), false);
   assert.equal(gh.files.has('tasks/pending/t-new.json'), true, 'the newer task stays pending');
   const today = new Date();
@@ -164,6 +173,8 @@ test('happy path: oldest task answered, done file written, pending deleted, log 
   assert.equal(log.length, 1);
   assert.equal(log[0].id, 't-old');
   assert.equal(log[0].status, 'done');
+  assert.equal(log[0].adapter_version, '0.3.1');
+  assert.equal(log[0].bridge_version, '0.3.1');
 });
 
 test('task with an explicit model passes it through to the bridge', async () => {
@@ -295,24 +306,25 @@ test('createGitHubClient turns a rate limit into a backoff error', async () => {
 test('createBridgeCaller polls GET /tasks/:id when ask_gemini returns pending', async () => {
   let taskCalls = 0;
   const fetchImpl = async (url, opts = {}) => {
-    if (url.endsWith('/status')) return jsonResponse({ ok: true, extensions: [{ id: 'p1' }] });
+    if (url.endsWith('/status')) return jsonResponse({ ok: true, version: '0.3.1', disk_version: '0.3.1', extensions: [{ id: 'p1' }] });
     if (url.endsWith('/call')) {
       return jsonResponse({ ok: true, result: { status: 'pending', task_id: 'task_x' } });
     }
     if (url.includes('/tasks/task_x')) {
       taskCalls++;
       if (taskCalls < 2) return jsonResponse({ status: 'running' });
-      return jsonResponse({ status: 'done', answer: 'slow answer', model: 'Neon', elapsedMs: 9000 });
+      return jsonResponse({ status: 'done', answer: 'slow answer', model: 'Neon', elapsedMs: 9000, adapterVersion: '0.3.1' });
     }
     return jsonResponse({}, 404);
   };
   const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10 });
   const st = await bridge.status();
-  assert.deepEqual(st, { up: true, extensions: 1 });
+  assert.deepEqual(st, { up: true, extensions: 1, version: '0.3.1', diskVersion: '0.3.1' });
   const res = await bridge.ask({ prompt: 'slow one', model: 'Neon', timeoutMs: 30000 });
   assert.equal(res.answer, 'slow answer');
   assert.equal(res.model, 'Neon');
   assert.equal(res.elapsedMs, 9000);
+  assert.equal(res.adapterVersion, '0.3.1', 'polled task carries the adapter version that answered');
   assert.ok(taskCalls >= 2);
 });
 
@@ -326,4 +338,106 @@ test('createBridgeCaller marks a busy bridge with code "busy"', async () => {
     assert.equal(e.code, 'busy');
     return true;
   });
+});
+
+// ---------- version self-check (v0.3.1) ----------
+// Background: task -003 (2026-11-21) failed with the 0.2.0 send-button
+// error while the panel showed 0.3.0 — the Gemini tab ran the old adapter
+// and nothing in the runner log said so. The runner now logs the bridge
+// version before every ask and the adapter version with the result, and
+// flags a mismatch in plain language.
+
+test('adapterVersionFromError extracts the version tag, null when absent', () => {
+  assert.equal(adapterVersionFromError('ask_gemini: gemini send button not found [adapter_version: 0.2.0]'), '0.2.0');
+  assert.equal(adapterVersionFromError('ask_gemini: something failed [adapter_version: 0.3.1-test]'), '0.3.1-test');
+  assert.equal(adapterVersionFromError('plain error, no version'), null);
+  assert.equal(adapterVersionFromError(''), null);
+  assert.equal(adapterVersionFromError(null), null);
+});
+
+test('createBridgeCaller ask returns adapter_version on the direct path', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/call')) {
+      return jsonResponse({ ok: true, result: { answer: 'direct answer', model: 'Neon', elapsed_ms: 100, adapter_version: '0.3.1' } });
+    }
+    return jsonResponse({}, 404);
+  };
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10 });
+  const res = await bridge.ask({ prompt: 'q', model: 'Neon', timeoutMs: 30000 });
+  assert.equal(res.answer, 'direct answer');
+  assert.equal(res.adapterVersion, '0.3.1');
+});
+
+test('createBridgeCaller ask error carries adapterVersion from the version tag', async () => {
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/call')) {
+      return jsonResponse({ ok: false, error: 'ask_gemini: gemini send button not found [adapter_version: 0.2.0]' });
+    }
+    return jsonResponse({}, 404);
+  };
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10 });
+  await assert.rejects(bridge.ask({ prompt: 'q', model: 'Neon' }), (e) => {
+    assert.match(e.message, /send button not found/);
+    assert.equal(e.adapterVersion, '0.2.0');
+    return true;
+  });
+});
+
+test('processOneTask logs the bridge version line before asking', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({ version: '0.3.1', diskVersion: '0.3.1' });
+  const lines = [];
+  const res = await processOneTask({ github, bridge, log: (m) => lines.push(m) });
+  assert.equal(res.status, 'done');
+  assert.ok(lines.some((l) => /bridge v0\.3\.1 \(disk v0\.3\.1\), 1 extension connected — asking task t1/.test(l)),
+    'expected a bridge version line, got: ' + JSON.stringify(lines));
+  assert.equal(lines.some((l) => /版本不一致/.test(l)), false, 'no mismatch warning when versions agree');
+});
+
+test('processOneTask flags a bridge/adapter version mismatch in the log', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  // Bridge runs 0.3.1 but the tab answered with the 0.2.0 adapter: the
+  // -003 situation. The log must say so in plain language.
+  const bridge = makeFakeBridge({ version: '0.3.1', diskVersion: '0.3.1', adapterVersion: '0.2.0' });
+  const lines = [];
+  const res = await processOneTask({ github, bridge, log: (m) => lines.push(m) });
+  assert.equal(res.status, 'done');
+  assert.equal(res.adapterVersion, '0.2.0');
+  assert.ok(lines.some((l) => /版本不一致: bridge v0\.3\.1，但 Gemini 适配器 v0\.2\.0/.test(l)),
+    'expected a mismatch warning, got: ' + JSON.stringify(lines));
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').adapter_version, '0.2.0');
+});
+
+test('processOneTask failure records adapter_version in the failed file (error property)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({ failWith: 'gemini send did not register', failAdapterVersion: '0.2.0' });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'failed');
+  assert.equal(res.adapterVersion, '0.2.0');
+  const failed = readRepo(gh.files, 'tasks/failed/t1.error.json');
+  assert.equal(failed.adapter_version, '0.2.0');
+  assert.equal(failed.bridge_version, '0.3.1');
+});
+
+test('processOneTask failure records adapter_version from the error-string tag', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  // The router embeds the tag in the error string (plain-text bridge
+  // channel); the runner must recover it even without the property.
+  const bridge = makeFakeBridge({ failWith: 'ask_gemini: gemini send button not found [adapter_version: 0.2.0]' });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'failed');
+  assert.equal(res.adapterVersion, '0.2.0');
+  assert.equal(readRepo(gh.files, 'tasks/failed/t1.error.json').adapter_version, '0.2.0');
 });
