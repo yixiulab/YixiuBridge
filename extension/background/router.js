@@ -120,6 +120,16 @@
     if (/^chrome:\/\//.test(tab.url || '')) {
       return { title: tab.title || '', url: tab.url || '', textExcerpt: '', textLength: 0, note: 'Chrome internal pages cannot be read' };
     }
+    // Prefer the content script when the tab has one (Gemini tabs do): it
+    // reads the page without the debugger, so Chrome shows no debugging
+    // infobar at all. Other pages have no content script, so fall back to
+    // a brief debugger attach (attach -> read -> detach). This keeps the
+    // bridge on the Gemini browser only: ask_gemini never touches the
+    // debugger, and read_page only ever attaches to the one tab being read.
+    try {
+      var res = await chrome.tabs.sendMessage(tab.id, { from: 'yixiubridge-sw', tool: 'read_page' });
+      if (res && res.ok && res.snapshot) return res.snapshot;
+    } catch (e) { /* no content script in this tab — use the debugger */ }
     var snap = await this.debugger.snapshot(tab.id);
     return snap;
   };
