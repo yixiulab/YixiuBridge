@@ -40,6 +40,17 @@
 //   box in the DOM tree wins. If nothing is found, the error now dumps
 //   the buttons near the prompt box (tag, aria-label, title, class,
 //   data-test-id, icon, text) so the next failure is self-diagnosing.
+// - Enter fallback (v0.3.2, ground truth from task -005, 2026-11-21):
+//   the new adapter was confirmed running ([adapter_version: 0.3.1] in
+//   the error) yet every layer missed and the 26-button dump had no send
+//   control at all — the visible blue arrow is NOT a <button> (probably
+//   a div/custom element with a click handler, or inside a shadow root).
+//   So when no button is found, ask() now presses Enter on the prompt
+//   box first and verifies the message left, exactly as after a click.
+//   Only when Enter also fails does it report "not found", with the
+//   nearby-buttons dump PLUS the arrow icon's ancestor chain (icon +
+//   4 levels up: tag/class/role), so the next failure names the real
+//   control element instead of guessing.
 // - Model selection (v0.2, built from the user's real screenshot of the
 //   Gemini web model menu, Chinese UI):
 //     自动 / 根据需求调整回答
@@ -375,6 +386,40 @@
         lines.push(describeButton(all[i]));
       }
       return { total: total, lines: lines };
+    }
+
+    // One-line description of one ancestor in the icon chain: tag, up to 3
+    // classes, role, aria-label, and the icon name when the node is an icon.
+    function describeAncestor(el) {
+      var s = el.tagName ? el.tagName.toLowerCase() : 'element';
+      var cls = attrOf(el, 'class');
+      if (cls) s += '.' + cls.trim().split(/\s+/).slice(0, 3).join('.');
+      var role = attrOf(el, 'role');
+      if (role) s += '[role=' + role + ']';
+      var label = attrOf(el, 'aria-label');
+      if (label) s += '[aria-label="' + label.slice(0, 40) + '"]';
+      var iname = attrOf(el, 'data-mat-icon-name') || attrOf(el, 'fonticon');
+      if (iname) s += ' icon="' + iname + '"';
+      return s;
+    }
+
+    // Ancestor chain of the send-arrow icon, for the not-found error: the
+    // arrow is visible in the UI but matched no <button>, so the error
+    // must say what element actually carries it (a div? a custom element?
+    // a shadow host?). The icon itself + 4 levels up, describeButton-style.
+    // 'No arrow_upward icon found in the page.' when the icon is gone too
+    // (page re-rendered without it, or it lives in a shadow root the
+    // content script cannot see into).
+    function iconAncestorChain() {
+      var icons = queryAll(doc, ['[data-mat-icon-name*="arrow_up"]', '[fonticon*="arrow_up"]']);
+      if (!icons.length) return 'No arrow_upward icon found in the page.';
+      var parts = [];
+      var n = icons[0];
+      for (var i = 0; i < 5 && n; i++) {
+        parts.push(describeAncestor(n));
+        n = n.parent || n.parentNode || null;
+      }
+      return parts.join(' > ');
     }
 
     // Layered send-button discovery. Returns { el, selector, candidates }.
@@ -815,32 +860,9 @@
         }
         var beforeText = getLatestResponseText();
         fillPromptBox(box.el, String(prompt), win);
-        var send = findSendButton(box.el);
-        if (!send.el) {
-          var dump = nearbyButtonsDump(box.el);
-          var tried = 'icon [data-mat-icon-name*="arrow_up"] -> closest button'
-            + ' | ' + SELECTORS.SEND_BUTTON.join(' | ')
-            + ' | ' + SELECTORS.SEND_BUTTON_BROAD.join(' | ')
-            + ' | role=button + send-like text | button svg arrow icon';
-          var err = 'gemini send button not found — UI may have changed (tried: ' + tried + ')';
-          if (dump.total) {
-            err += ' Buttons near the prompt box (' + dump.total + ' total, nearest first): ' + dump.lines.join(' | ');
-          } else {
-            err += ' No buttons found in the page at all.';
-          }
-          return { ok: false, error: err };
-        }
-        if (send.el.disabled) {
-          return { ok: false, error: 'gemini send button is disabled — the prompt may not have registered, or a previous answer is still running' };
-        }
-        try { send.el.click(); } catch (e) {
-          return { ok: false, error: 'gemini send button click failed: ' + (e && e.message ? e.message : String(e)) };
-        }
         // Verify the message actually left the box: a click can land on a
         // decoy button, or the page can ignore it. Sent = streaming started,
-        // or the box cleared, or a new response appeared. If not sent, retry
-        // with Enter; if that also fails, fail fast with a clear error
-        // instead of waiting out the whole timeout for nothing.
+        // or the box cleared, or a new response appeared.
         var confirmSent = async function () {
           await sleep(sendCheckMs);
           if (isStreaming()) return true;
@@ -849,13 +871,47 @@
           if (now && now !== beforeText) return true;
           return false;
         };
-        var sent = await confirmSent();
-        if (!sent) {
+        var send = findSendButton(box.el);
+        if (!send.el) {
+          // No button matched at all. The visible blue arrow may be a
+          // div/custom element or live in a shadow root (task -005: the
+          // 26-button dump had no send control). Try Enter on the prompt
+          // box before giving up — a successful Enter send is
+          // indistinguishable from a button click once the answer streams.
           dispatchEnter(box.el, win);
-          sent = await confirmSent();
-        }
-        if (!sent) {
-          return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed.' };
+          if (!(await confirmSent())) {
+            var dump = nearbyButtonsDump(box.el);
+            var tried = 'icon [data-mat-icon-name*="arrow_up"] -> closest button'
+              + ' | ' + SELECTORS.SEND_BUTTON.join(' | ')
+              + ' | ' + SELECTORS.SEND_BUTTON_BROAD.join(' | ')
+              + ' | role=button + send-like text | button svg arrow icon';
+            var err = 'gemini send button not found — Enter fallback also did not send the prompt (tried: ' + tried + ')';
+            if (dump.total) {
+              err += ' Buttons near the prompt box (' + dump.total + ' total, nearest first): ' + dump.lines.join(' | ');
+            } else {
+              err += ' No buttons found in the page at all.';
+            }
+            err += ' Send-arrow icon ancestors: ' + iconAncestorChain();
+            return { ok: false, error: err };
+          }
+        } else {
+          if (send.el.disabled) {
+            return { ok: false, error: 'gemini send button is disabled — the prompt may not have registered, or a previous answer is still running' };
+          }
+          try { send.el.click(); } catch (e) {
+            return { ok: false, error: 'gemini send button click failed: ' + (e && e.message ? e.message : String(e)) };
+          }
+          // If the click did not send, retry with Enter; if that also
+          // fails, fail fast with a clear error instead of waiting out
+          // the whole timeout for a message that was never sent.
+          var sent = await confirmSent();
+          if (!sent) {
+            dispatchEnter(box.el, win);
+            sent = await confirmSent();
+          }
+          if (!sent) {
+            return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed.' };
+          }
         }
         var done = await waitForCompletion(startedAt, deadline);
         if (!done.ok) return done;
