@@ -67,7 +67,7 @@ test('box clears but no response ever appears fails with "no response appeared" 
   const res = await adapter.ask('写一个番茄钟网页');
   assert.equal(res.ok, false, 'confirmSent passed (box cleared) but no model text ever appeared — must fail, not return the home screen');
   assert.match(res.error, /no response appeared/);
-  assert.match(res.error, /adapter_version: 0\.4.0/);
+  assert.match(res.error, /adapter_version: 0\.4.1/);
   assert.equal(res.adapter_version, Adapter.ADAPTER_VERSION);
   assert.equal(res.partial, '', 'partial must be empty, never home-screen text');
   assert.doesNotMatch(res.error, /需要我为你做些什么/);
