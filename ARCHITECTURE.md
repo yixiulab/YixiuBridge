@@ -166,3 +166,7 @@ Muse（云端） --GET tasks/done/<id>.answer.json--> GitHub
 **一键启动**：`scripts/update-and-start.ps1` 第 3 步优先走在线更新（`scripts/online-update-cli.mjs`，退出码 0 算成功；CLI 是用户手动跑的，所以不限制 channel，beta 也装）；在线更新失败或模块不存在时退回整包 ZIP 下载。`$downloaded` 为真时自我更新交接照常跑（新版脚本接管）。
 
 **Gemini 写稿的两个教训（040-001/040-003）**：(1) 回稿在传输里丢了模板字符串的反引号（`` ` ``）和块注释的 `/*` 开头——`const portSuffix = :${port};`、`['/FI', PID eq ${pid}, ...]`、`log(在线更新...${msg})` 这样直接粘贴是语法错误，接入时必须逐行补回，`node --check` 是最后一道关；(2) 040-003 的 runner 接入稿有 4 处逻辑错：`Boolean(processOneTask(...))` 恒为真（它返回对象，空闲是 `res.status === 'empty'`）、`hasPendingTasks` 读的是本地根本不存在的 `tasks/pending` 目录、`loadConfig` 忘加 `await`、清理函数引用了不存在的 `loopTimer`/`lockFile`——Muse 按真实代码重写了接入层，没照抄。
+
+## 思考等级改为非致命（v0.4.2）
+
+0.4.1 让 runner 每次都传 `thinking: 高`，适配器 `selectThinkingLevel` 选完后验按钮文字（须含“高”），验不过就让整个问答失败。真机上两次探针都栽在这儿：第一次是模型选择器找不到（瞬时），第二次选完 高 后按钮仍显示 “Neon”（`gemini thinking level did not stick`），任务直接失败。根因是等级只是偏好、不是问答的前提——0.4.1 之前 runner 从不碰这个设置，问答一直正常。修法：`selectThinkingLevel` 的错误分两类——`invalid-level`（等级名本身不在菜单里，调用方错，照常快速失败）、`apply-failed`（子菜单找不到、点不中、按钮文字不变，UI 问题）；`askImpl` 里只有前者才失败，后者记成 `thinkingWarning`、照常问答，成功结果里带上它；等级验证改为 2 秒内轮询（400ms 读一次不准）。runner 把 `thinkingWarning` 接进 done 文件（`thinking_warning` 字段），所以 done 文件里 `asked_thinking: 高` 配上 `thinking_warning` 才诚实。注意：这只修了“问答不被等级卡住”，等级本身在真机上到底生效没有、按钮为什么不显示 高，仍待拿真实 DOM 证据再查。
