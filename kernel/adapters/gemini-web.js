@@ -26,6 +26,20 @@
 //   response appeared). If not, it retries with an Enter keydown, then
 //   fails fast with a clear error instead of waiting out the full timeout
 //   for a message that was never sent.
+// - Send-button discovery (v0.3, ground truth from the user's real page,
+//   2026-11-21): the real Send button is an Angular Material button with
+//   NO usable aria-label — it carries a <mat-icon
+//   data-mat-icon-name="arrow_upward" fonticon="arrow_upward">. The 7
+//   aria-label selectors all missed it and ask_gemini failed with "send
+//   button not found" even though the blue arrow was visible on screen.
+//   Discovery is now layered: (1) the arrow_upward icon -> closest
+//   button; (2) the original aria-label / data-test-id / class selectors;
+//   (3) broad fallbacks (title substrings, data-test-id*="send",
+//   class*="send", role="button" with send-like text, an SVG arrow icon
+//   inside a button). When several match, the button nearest the prompt
+//   box in the DOM tree wins. If nothing is found, the error now dumps
+//   the buttons near the prompt box (tag, aria-label, title, class,
+//   data-test-id, icon, text) so the next failure is self-diagnosing.
 // - Model selection (v0.2, built from the user's real screenshot of the
 //   Gemini web model menu, Chinese UI):
 //     自动 / 根据需求调整回答
@@ -73,6 +87,21 @@
       'button[aria-label="发送消息"]',
       'button[aria-label*="发送"]',
       'button.send-button',
+    ],
+    // Broad send-button fallbacks (v0.3). Tried only after the icon lookup
+    // and the original selectors above. Title variants included because
+    // some layouts label the button via title instead of aria-label.
+    SEND_BUTTON_BROAD: [
+      'button[title*="发送"]',
+      'button[title*="Send"]',
+      'button[title*="提交"]',
+      'button[title*="Submit"]',
+      'button[aria-label*="提交"]',
+      'button[aria-label*="Submit"]',
+      'button[data-test-id*="send"]',
+      'button[data-test-id*="Send"]',
+      'button[class*="send"]',
+      'button[class*="Send"]',
     ],
     // Shown while the model is streaming; disappears when it is done.
     STOP_BUTTON: [
@@ -221,8 +250,174 @@
       return queryFirst(doc, SELECTORS.PROMPT_BOX);
     }
 
-    function findSendButton() {
-      return queryFirst(doc, SELECTORS.SEND_BUTTON);
+    function attrOf(el, name) {
+      try {
+        var v = el && el.getAttribute ? el.getAttribute(name) : null;
+        return (v === null || v === undefined) ? '' : String(v);
+      } catch (e) { return ''; }
+    }
+
+    // A real <button>, or an element acting as one (role="button"). The
+    // Gemini page uses real buttons, but a role=button div is clickable the
+    // same way and must not be dropped by the discovery below.
+    function isClickableButton(el) {
+      if (!el) return false;
+      if (el.tagName === 'BUTTON') return true;
+      try {
+        return el.getAttribute ? el.getAttribute('role') === 'button' : false;
+      } catch (e) { return false; }
+    }
+
+    // Nearest <button> (or role=button) ancestor of an element — the icon
+    // inside the send button has no button semantics of its own. Uses native
+    // closest() when available, falls back to walking the parent chain
+    // (fake DOM in tests).
+    function closestButton(el) {
+      if (!el) return null;
+      try {
+        if (typeof el.closest === 'function') {
+          var b = el.closest('button, [role="button"]');
+          if (b) return b;
+        }
+      } catch (e) { /* fall through to the parent walk */ }
+      var n = el;
+      while (n) {
+        if (isClickableButton(n)) return n;
+        n = n.parent || n.parentNode || null;
+      }
+      return null;
+    }
+
+    // Does this element look like a send/submit control? Checks aria-label,
+    // title, data-test-id, data-tooltip and visible text, Chinese + English.
+    function looksLikeSend(el) {
+      var hay = [
+        attrOf(el, 'aria-label'), attrOf(el, 'title'),
+        attrOf(el, 'data-test-id'), attrOf(el, 'data-tooltip'),
+        textOf(el),
+      ].join(' ').toLowerCase();
+      return hay.indexOf('发送') !== -1 || hay.indexOf('提交') !== -1
+        || hay.indexOf('send') !== -1 || hay.indexOf('submit') !== -1;
+    }
+
+    function ancestorsOf(el) {
+      var out = [];
+      var n = el;
+      while (n) { out.push(n); n = n.parent || n.parentNode || null; }
+      return out;
+    }
+
+    // DOM-tree distance between two elements: steps up to their lowest common
+    // ancestor, from both sides. Used to prefer the send button nearest the
+    // prompt box when several candidates match.
+    function domDistance(a, b) {
+      if (!a || !b) return 1e9;
+      var ancA = ancestorsOf(a);
+      var ancB = ancestorsOf(b);
+      for (var i = 0; i < ancA.length; i++) {
+        var j = ancB.indexOf(ancA[i]);
+        if (j !== -1) return i + j;
+      }
+      return 1e9;
+    }
+
+    // One-line description of a button for diagnostics: tag, aria-label,
+    // title, class, data-test-id, role, icon name, visible text.
+    function describeButton(el) {
+      var parts = [];
+      parts.push(el.tagName ? el.tagName.toLowerCase() : 'element');
+      var label = attrOf(el, 'aria-label');
+      if (label) parts.push('aria-label="' + label.slice(0, 60) + '"');
+      var title = attrOf(el, 'title');
+      if (title) parts.push('title="' + title.slice(0, 60) + '"');
+      var cls = attrOf(el, 'class');
+      if (cls) parts.push('class="' + cls.slice(0, 80) + '"');
+      var dtid = attrOf(el, 'data-test-id');
+      if (dtid) parts.push('data-test-id="' + dtid + '"');
+      var role = attrOf(el, 'role');
+      if (role) parts.push('role="' + role + '"');
+      try {
+        var iconEl = el.querySelector ? el.querySelector('[data-mat-icon-name]') : null;
+        if (iconEl) {
+          var iname = attrOf(iconEl, 'data-mat-icon-name') || attrOf(iconEl, 'fonticon');
+          if (iname) parts.push('icon="' + iname + '"');
+        }
+      } catch (e) { /* ignore */ }
+      var t = textOf(el);
+      if (t) parts.push('text="' + t.slice(0, 40) + '"');
+      if (el.disabled) parts.push('[disabled]');
+      return parts.join(' ');
+    }
+
+    // Buttons near the prompt box, nearest first, max 10. Used in the
+    // not-found error so the next failure is self-diagnosing.
+    function nearbyButtonsDump(boxEl) {
+      var all = queryAll(doc, ['button', '[role="button"]']);
+      all.sort(function (a, b) { return domDistance(a, boxEl) - domDistance(b, boxEl); });
+      var lines = [];
+      var total = all.length;
+      for (var i = 0; i < all.length && lines.length < 10; i++) {
+        lines.push(describeButton(all[i]));
+      }
+      return { total: total, lines: lines };
+    }
+
+    // Layered send-button discovery. Returns { el, selector, candidates }.
+    // `selector` names how the winner was found (for error messages);
+    // `candidates` is the full ranked list (for diagnostics).
+    function findSendButton(boxEl) {
+      var cands = [];
+      var seen = [];
+      function add(el, via) {
+        if (!isClickableButton(el)) return;
+        if (seen.indexOf(el) !== -1) return;
+        seen.push(el);
+        cands.push({ el: el, via: via });
+      }
+      // Layer 1 — the real Gemini button (ground truth, 2026-11-21): an
+      // Angular Material button whose <mat-icon data-mat-icon-name=
+      // "arrow_upward" (fonticon="arrow_upward") carries no aria-label.
+      var icons = queryAll(doc, ['[data-mat-icon-name*="arrow_up"]', '[fonticon*="arrow_up"]']);
+      for (var i = 0; i < icons.length; i++) {
+        add(closestButton(icons[i]), 'icon[data-mat-icon-name="arrow_upward"] -> closest button');
+      }
+      // Layer 2 — the original aria-label / data-test-id / class selectors.
+      var orig = queryAll(doc, SELECTORS.SEND_BUTTON);
+      for (var j = 0; j < orig.length; j++) {
+        add(orig[j], 'selector match');
+      }
+      // Layer 3 — broad fallbacks.
+      var broad = queryAll(doc, SELECTORS.SEND_BUTTON_BROAD);
+      for (var k = 0; k < broad.length; k++) {
+        add(broad[k], 'broad fallback selector');
+      }
+      // role="button" elements with send-like text/labels.
+      var roleBtns = queryAll(doc, ['[role="button"]']);
+      for (var r = 0; r < roleBtns.length; r++) {
+        if (looksLikeSend(roleBtns[r])) add(closestButton(roleBtns[r]), 'role=button + send-like text');
+      }
+      // An inline SVG arrow icon inside a button (other icon sets).
+      var svgs = queryAll(doc, ['button svg']);
+      for (var g = 0; g < svgs.length; g++) {
+        var svgHay = (attrOf(svgs[g], 'class') + ' ' + attrOf(svgs[g], 'aria-label')).toLowerCase();
+        if (svgHay.indexOf('arrow') !== -1 || svgHay.indexOf('upward') !== -1 || svgHay.indexOf('send') !== -1) {
+          add(closestButton(svgs[g]), 'svg arrow icon inside button');
+        }
+      }
+      if (!cands.length) return { el: null, selector: null, candidates: [] };
+      // Rank: visible + enabled first, then nearest to the prompt box.
+      // A disabled button is still returned when it is the only candidate,
+      // so ask() can report "disabled" instead of "not found".
+      cands.sort(function (a, b) {
+        var va = isVisible(a.el) ? 0 : 1;
+        var vb = isVisible(b.el) ? 0 : 1;
+        if (va !== vb) return va - vb;
+        var da = a.el.disabled ? 1 : 0;
+        var db = b.el.disabled ? 1 : 0;
+        if (da !== db) return da - db;
+        return domDistance(a.el, boxEl) - domDistance(b.el, boxEl);
+      });
+      return { el: cands[0].el, selector: cands[0].via, candidates: cands };
     }
 
     function isStreaming() {
@@ -583,15 +778,33 @@
           var th = await selectThinkingLevel(askOpts.thinking);
           if (!th.ok) return th;
         }
+        // The model switch can re-render the input area and can leave the
+        // menu open; close it and let the DOM settle before looking for
+        // the prompt box / send button.
+        if (askOpts.model || askOpts.thinking) {
+          await closeModelMenu();
+          await sleep(300);
+        }
         var box = findPromptBox();
         if (!box.el) {
           return { ok: false, error: 'gemini prompt box not found — UI may have changed (tried: ' + SELECTORS.PROMPT_BOX.join(' | ') + ')' };
         }
         var beforeText = getLatestResponseText();
         fillPromptBox(box.el, String(prompt), win);
-        var send = findSendButton();
+        var send = findSendButton(box.el);
         if (!send.el) {
-          return { ok: false, error: 'gemini send button not found — UI may have changed (tried: ' + SELECTORS.SEND_BUTTON.join(' | ') + ')' };
+          var dump = nearbyButtonsDump(box.el);
+          var tried = 'icon [data-mat-icon-name*="arrow_up"] -> closest button'
+            + ' | ' + SELECTORS.SEND_BUTTON.join(' | ')
+            + ' | ' + SELECTORS.SEND_BUTTON_BROAD.join(' | ')
+            + ' | role=button + send-like text | button svg arrow icon';
+          var err = 'gemini send button not found — UI may have changed (tried: ' + tried + ')';
+          if (dump.total) {
+            err += ' Buttons near the prompt box (' + dump.total + ' total, nearest first): ' + dump.lines.join(' | ');
+          } else {
+            err += ' No buttons found in the page at all.';
+          }
+          return { ok: false, error: err };
         }
         if (send.el.disabled) {
           return { ok: false, error: 'gemini send button is disabled — the prompt may not have registered, or a previous answer is still running' };
