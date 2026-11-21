@@ -50,12 +50,26 @@
       },
     },
     {
+      name: 'list_models',
+      description: 'List the models in the Gemini web model picker (does not change the selection). Returns {current, buttonText, models: [{label, codename, description, selected, locked}]}. Labels are Chinese (自动 / 日常帮助 / 更深入的分析 / 代码和复杂工作), codenames are Hydrogen / Neon / Carbon. Locked models (e.g. Carbon on a free account) cannot be selected.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          profile: { type: 'string', description: 'Chrome profile id/label (optional, same as browser)' },
+          browser: { type: 'string', description: 'Chrome profile id/label (optional)' },
+        },
+        required: [],
+      },
+    },
+    {
       name: 'ask_gemini',
       description: 'Ask the Gemini web chat a question in the real logged-in Chrome and wait for the answer to finish. Returns {answer, model, elapsed_ms}. If the answer is still streaming when timeout_s runs out it returns {status:"pending", task_id} — poll get_answer for the result.',
       inputSchema: {
         type: 'object',
         properties: {
           prompt: { type: 'string', description: 'The question/task to send to Gemini web' },
+          model: { type: 'string', description: 'Gemini model to use, by codename or Chinese label, e.g. "Neon", "Hydrogen", "日常帮助". If omitted, uses the model currently selected in the Gemini web UI. Recommended high model: Neon. Locked models (e.g. Carbon on a free account) fail fast with a clear error.' },
+          thinking: { type: 'string', description: 'Thinking level from the 思考等级 submenu, e.g. "高" / "中" / "低" (best-effort). Omit to keep the current level.' },
           profile: { type: 'string', description: 'Chrome profile id/label (optional, same as browser)' },
           browser: { type: 'string', description: 'Chrome profile id/label (optional)' },
           timeout_s: { type: 'number', description: 'Max seconds to wait for the answer (default 180, max 600)' },
