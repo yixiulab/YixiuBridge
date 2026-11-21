@@ -23,16 +23,58 @@
     return /^Profile \d+$/.test(name);
   }
 
-  // Does this profile show evidence of the extension? Either the extension
-  // ID appears in its Secure Preferences text, or the profile has a
-  // "Local Extension Settings/<id>" directory (the extension has used
-  // local storage there). Either signal counts as a match.
+  // Does this profile show evidence of the extension? Any one of three
+  // signals counts as a match:
+  // (1) the extension ID appears in the profile's regular Preferences
+  //     text — the PRIMARY signal for an unpacked (developer-mode)
+  //     extension: Chrome records it under extensions.settings.<id>
+  //     (location 4, with a `path` field) in Preferences, NOT in Secure
+  //     Preferences. Ground truth 2026-11-21: Profile 21's Secure
+  //     Preferences has no trace of the ID although the extension is
+  //     loaded there — the 0.3.1 scan matched 0 of 72 profiles because
+  //     it only looked at Secure Preferences.
+  // (2) the ID appears in Secure Preferences text (store-installed
+  //     extensions land there);
+  // (3) the profile has a "Local Extension Settings/<id>" directory
+  //     (the extension has used local storage there).
   function profileHasExtension(evidence) {
     if (!evidence) return false;
     if (evidence.localExtSettingsExists) return true;
-    var text = evidence.securePrefsText;
+    var text = evidence.prefsText;
     if (typeof text === 'string' && text.indexOf(EXTENSION_ID) !== -1) return true;
+    var secure = evidence.securePrefsText;
+    if (typeof secure === 'string' && secure.indexOf(EXTENSION_ID) !== -1) return true;
     return false;
+  }
+
+  // Which evidence matched, in priority order. [] when nothing matched.
+  // The PowerShell script prints this for the chosen profile so the next
+  // failure is self-diagnosing from the output alone.
+  function matchedEvidence(evidence) {
+    var out = [];
+    if (!evidence) return out;
+    var text = evidence.prefsText;
+    if (typeof text === 'string' && text.indexOf(EXTENSION_ID) !== -1) out.push('Preferences');
+    var secure = evidence.securePrefsText;
+    if (typeof secure === 'string' && secure.indexOf(EXTENSION_ID) !== -1) out.push('Secure Preferences');
+    if (evidence.localExtSettingsExists) out.push('Local Extension Settings');
+    return out;
+  }
+
+  // The folder Chrome actually loads the unpacked extension from, read
+  // from the profile's Preferences JSON:
+  // extensions.settings.<id>.path (present for location 4 / unpacked).
+  // Returns the path string, or null when absent / unparsable / the ID
+  // is not in the text at all. Never throws.
+  function extensionPathFromPrefs(prefsText) {
+    if (typeof prefsText !== 'string' || prefsText.indexOf(EXTENSION_ID) === -1) return null;
+    try {
+      var prefs = JSON.parse(prefsText);
+      var settings = prefs && prefs.extensions && prefs.extensions.settings;
+      var entry = settings && settings[EXTENSION_ID];
+      if (entry && typeof entry.path === 'string' && entry.path) return entry.path;
+    } catch (e) { /* unparsable Preferences: no path */ }
+    return null;
   }
 
   // Pick which matched profile to open.
@@ -90,6 +132,8 @@
     EXTENSION_ID: EXTENSION_ID,
     isProfileDirName: isProfileDirName,
     profileHasExtension: profileHasExtension,
+    matchedEvidence: matchedEvidence,
+    extensionPathFromPrefs: extensionPathFromPrefs,
     selectChromeProfile: selectChromeProfile,
     needsSelfUpdate: needsSelfUpdate,
   };
