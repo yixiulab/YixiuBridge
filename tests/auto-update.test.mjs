@@ -37,7 +37,7 @@ test('shouldAutoReload never loops on a version it already reloaded for', () => 
 });
 
 test('constants carry the current version', () => {
-  assert.equal(C.EXTENSION_VERSION, '0.3.1');
+  assert.equal(C.EXTENSION_VERSION, '0.3.2');
 });
 
 // --- Chrome profile discovery (v0.3.1 fix) ---
@@ -66,6 +66,50 @@ test('profileHasExtension accepts either evidence signal', () => {
   assert.equal(D.profileHasExtension({ securePrefsText: null, localExtSettingsExists: false }), false, 'unreadable prefs, no dir');
   assert.equal(D.profileHasExtension(null), false);
   assert.equal(D.profileHasExtension({}), false);
+});
+
+// --- Preferences evidence (v0.3.2 fix) ---
+// Ground truth 2026-11-21: Profile 21's Secure Preferences has no trace
+// of the extension ID, yet the extension is loaded there — Chrome records
+// an unpacked (developer-mode) extension under extensions.settings.<id>
+// (location 4 + path) in the regular Preferences file, not in Secure
+// Preferences. The 0.3.1 scan only looked at Secure Preferences and
+// matched 0 of 72 profiles. Preferences text is now the primary signal.
+
+function prefsWithExtension(id, extra) {
+  const entry = Object.assign({ location: 4, path: 'C:\\software\\myself\\YixiuBridge-main\\extension' }, extra || {});
+  const settings = {};
+  settings[id] = entry;
+  return JSON.stringify({ extensions: { settings: settings } });
+}
+
+test('profileHasExtension matches an unpacked extension via Preferences text', () => {
+  const id = D.EXTENSION_ID;
+  assert.equal(D.profileHasExtension({ prefsText: prefsWithExtension(id), securePrefsText: '{}', localExtSettingsExists: false }), true, 'ID in Preferences only — Secure Preferences has no trace of it');
+  assert.equal(D.profileHasExtension({ prefsText: prefsWithExtension('otherid0000000000000000000000'), securePrefsText: '{}', localExtSettingsExists: false }), false, 'a different ID in Preferences is not a match');
+  assert.equal(D.profileHasExtension({ prefsText: '{}', securePrefsText: '{}', localExtSettingsExists: false }), false, 'ID in neither file');
+  assert.equal(D.profileHasExtension({ prefsText: null, securePrefsText: null, localExtSettingsExists: false }), false, 'both files unreadable');
+});
+
+test('matchedEvidence lists every signal that fired, in priority order', () => {
+  const id = D.EXTENSION_ID;
+  assert.deepEqual(D.matchedEvidence({ prefsText: prefsWithExtension(id), securePrefsText: '"...' + id + '..."', localExtSettingsExists: true }),
+    ['Preferences', 'Secure Preferences', 'Local Extension Settings'], 'all three');
+  assert.deepEqual(D.matchedEvidence({ prefsText: prefsWithExtension(id), securePrefsText: '{}', localExtSettingsExists: false }),
+    ['Preferences'], 'Preferences only — the unpacked-extension case');
+  assert.deepEqual(D.matchedEvidence({ prefsText: '{}', securePrefsText: '{}', localExtSettingsExists: false }), [], 'none');
+  assert.deepEqual(D.matchedEvidence(null), [], 'no evidence object');
+});
+
+test('extensionPathFromPrefs reads the loaded folder from Preferences JSON', () => {
+  const id = D.EXTENSION_ID;
+  assert.equal(D.extensionPathFromPrefs(prefsWithExtension(id)), 'C:\\software\\myself\\YixiuBridge-main\\extension');
+  assert.equal(D.extensionPathFromPrefs(prefsWithExtension(id, { path: undefined })), null, 'entry without a path');
+  assert.equal(D.extensionPathFromPrefs(JSON.stringify({ extensions: { settings: { otherid0000000000000000000000: { location: 4, path: 'C:\\x' } } } })), null, 'only a different ID present');
+  assert.equal(D.extensionPathFromPrefs('{"extensions":{"settings":{"' + id + '":{"location":4,"path":"C:\\\\x"'), null, 'malformed JSON never throws, just no path');
+  assert.equal(D.extensionPathFromPrefs('{}'), null, 'valid JSON, no extensions at all');
+  assert.equal(D.extensionPathFromPrefs(null), null);
+  assert.equal(D.extensionPathFromPrefs(''), null);
 });
 
 function profile(dir, modifiedMs, exe) {
