@@ -14,5 +14,5 @@
     "test": "node --test tests/gemini-adapter.test.mjs tests/protocol.test.mjs tests/debugger.test.mjs tests/router.test.mjs tests/adapter-version.test.mjs tests/model-select.test.mjs tests/muse-runner.test.mjs tests/send-button.test.mjs tests/auto-update.test.mjs tests/home-screen.test.mjs"
   },
   "type": "commonjs",
-  "version": "0.3.4"
+  "version": "0.3.5"
 }
