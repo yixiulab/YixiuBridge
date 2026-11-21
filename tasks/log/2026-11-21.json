@@ -119,5 +119,18 @@
     "elapsed_ms": 58532,
     "error": null,
     "at": "2026-11-21T20:20:17.044Z"
+  },
+  {
+    "id": "task-20261121-bridge-040-002",
+    "status": "failed",
+    "prompt": "为 YixiuBridge 写 v0.4.0 的第二部分：runner 接入在线更新（让更新真正自己跑起来，不用双击）。\n\n现状（以仓库 main 分支为准，0.3.7）：\n- host/online-updater.mjs 已有，导出：getLocalVersion(installDir, {fsImpl})、compareSemver(a,b)、checkForUpdate({token, i…",
+    "asked_model": "Neon",
+    "answered_model": null,
+    "adapter_version": "0.3.7",
+    "bridge_version": "0.3.7",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "ask_gemini failed: ask_gemini: gemini model picker button not found — UI may have changed (tried: button[data-test-id=\"model-switcher\"] | button[aria-label*=\"模型\"] | button[aria-label*=\"model\"] | button[aria-label*=\"Model\"] | [data-test-id=\"model-picker\"], plus buttons showing a model name) [adapter_version: 0.3.7]",
+    "at": "2026-11-21T20:52:39.306Z"
   }
 ]
