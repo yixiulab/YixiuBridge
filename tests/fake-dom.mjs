@@ -162,6 +162,14 @@ export class FakeElement {
     for (const c of this.children) walk(c);
     return out;
   }
+  closest(selector) {
+    let el = this;
+    while (el) {
+      if (matchesSelector(el, selector)) return el;
+      el = el.parent;
+    }
+    return null;
+  }
 }
 
 export class FakeDocument {
