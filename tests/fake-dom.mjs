@@ -7,6 +7,7 @@ export class FakeEvent {
   constructor(type, opts = {}) {
     this.type = type;
     this.bubbles = !!opts.bubbles;
+    this.cancelable = !!opts.cancelable;
     this.defaultPrevented = false;
   }
   preventDefault() { this.defaultPrevented = true; }
@@ -17,6 +18,8 @@ export class FakeKeyboardEvent extends FakeEvent {
     super(type, opts);
     this.key = opts.key || '';
     this.code = opts.code || '';
+    this.keyCode = opts.keyCode || 0;
+    this.which = opts.which || 0;
   }
 }
 
@@ -98,9 +101,13 @@ export class FakeElement {
     this._ownText = '';
     this.value = '';
     this.disabled = false;
+    this._focused = false;
     this._listeners = {};
     this._classes = new Set((attrs.class || '').split(/\s+/).filter(Boolean));
   }
+
+  // HTMLElement.focus(): marks the element focused (tests read _focused).
+  focus() { this._focused = true; }
 
   get classList() {
     const self = this;
