@@ -45,6 +45,26 @@
       return false;
     }
 
+    if (msg.tool === 'list_models') {
+      // Quick (1-2s): answer on the same channel. Return true to keep it
+      // open until the async adapter call finishes.
+      var adList = getAdapter();
+      if (!adList) {
+        sendResponse({ ok: false, error: 'gemini adapter not loaded in this page — extension files may be out of sync' });
+        return false;
+      }
+      adList.listModels().then(function (res) {
+        if (res && res.ok) {
+          sendResponse({ ok: true, result: { current: res.current, buttonText: res.buttonText, models: res.models } });
+        } else {
+          sendResponse({ ok: false, error: (res && res.error) || 'list_models failed' });
+        }
+      }).catch(function (e) {
+        sendResponse({ ok: false, error: 'gemini content script error: ' + (e && e.message ? e.message : String(e)) });
+      });
+      return true;
+    }
+
     if (msg.tool === 'ask_gemini') {
       // Start the ask in the background; report back via a separate message
       // so the original channel is not held open for minutes.
@@ -60,7 +80,11 @@
       }
       var prompt = (msg.params && msg.params.prompt) || '';
       var timeoutMs = ((msg.params && msg.params.timeout_s) || 180) * 1000;
-      ad.ask(prompt, { timeoutMs: timeoutMs }).then(function (res) {
+      ad.ask(prompt, {
+        timeoutMs: timeoutMs,
+        model: (msg.params && msg.params.model) || undefined,
+        thinking: (msg.params && msg.params.thinking) || undefined,
+      }).then(function (res) {
         chrome.runtime.sendMessage({ from: 'yixiubridge-gemini', type: 'ask_result', taskId: taskId, result: res });
       }).catch(function (e) {
         chrome.runtime.sendMessage({
@@ -77,5 +101,5 @@
   });
 
   // Debug handle (page context only, no data leaves the browser).
-  window.__YixiuBridge = { version: '0.1.0', page: 'gemini' };
+  window.__YixiuBridge = { version: '0.2.0', page: 'gemini' };
 })();
