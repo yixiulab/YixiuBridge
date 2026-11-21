@@ -80,5 +80,18 @@
     "elapsed_ms": null,
     "error": "ask_gemini timed out after 240s — the task may still be running in the browser; poll get_answer if it returned a task_id.",
     "at": "2026-11-21T16:44:42.145Z"
+  },
+  {
+    "id": "task-20261121-pomodoro-009",
+    "status": "failed",
+    "prompt": "做一个番茄钟网页，单文件 HTML，有开始/暂停/重置按钮，25 分钟工作、5 分钟休息，时间到了响一声（用 Web Audio API），界面要好看现代。只给完整代码，不要解释。",
+    "asked_model": "Neon",
+    "answered_model": null,
+    "adapter_version": "0.3.5",
+    "bridge_version": "0.3.5",
+    "bridge_task_id": "task_mwqrjsma0oxcj9",
+    "elapsed_ms": null,
+    "error": "gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: 0.3.5] [adapter_version: 0.3.5]",
+    "at": "2026-11-21T18:54:21.304Z"
   }
 ]
