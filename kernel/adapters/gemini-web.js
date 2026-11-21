@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.3.7';
+  var ADAPTER_VERSION = '0.4.0';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
