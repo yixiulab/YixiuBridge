@@ -104,11 +104,13 @@ node bin/yixiubridge.mjs runner
 
 > 令牌只存在你电脑 `~/.yixiubridge/config.json` 的 `github_token` 字段里（文件权限 0600），只发给 api.github.com。想收回就去 GitHub 网页删掉那个 PAT，或删 config.json 里这一行。详见 [SECURITY.md](SECURITY.md)。
 
-## 一键启动与自动更新（v0.3 新增，v0.3.1 修第 7 步）
+## 一键启动与自动更新（v0.3 新增，v0.3.1 修第 7 步，v0.3.2 改查 Preferences）
 
-**v0.3.1 不用再手动更新。** 你电脑里已经有 0.3.0 的一键启动.bat，直接双击它就行：它会下载 0.3.1 覆盖，下载完新版启动脚本自动接管继续执行（一次双击跑完新逻辑）。之后每次也只需要双击它：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner → 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件、不用再手动下载 ZIP。
+**v0.3.2 不用再手动更新。** 你电脑里已经有 0.3.1 的一键启动.bat，直接双击它就行：它会下载 0.3.2 覆盖，下载完新版启动脚本自动接管继续执行（一次双击跑完新逻辑）。之后每次也只需要双击它：检查 Node →（有令牌就）下载最新版覆盖 → 打包插件 → 重启桥 → 启动 runner → 打开装了插件的那个 Chrome 到 Gemini。不用再跑命令、不用再手动重载插件、不用再手动下载 ZIP。
 
 v0.3.1 修了第 7 步找 Chrome 的两个 bug：(1) 扫描结果误存在 PowerShell 自动变量 `$matches` 里，被 `-match` 改写成空对象，导致身份名为空、chrome.exe 路径为 Null——现在改用普通变量，且全脚本不再用 `-match`；(2) Chrome 运行时 `Secure Preferences` 可能读不到，旧脚本静默跳过——现在读不到会告警并列出哪些身份读不到，还多了 `Local Extension Settings\<扩展 ID>` 这条证据；一个身份都匹配不到时绝不乱开浏览器。报错也改实话实说了：会写明第几步失败、桥和 runner 各自起了没有。
+
+v0.3.2 修了第 7 步的证据来源：0.3.1 扫了 72 个身份 0 匹配——因为 Chrome 根本不把**解压扩展**写进 `Secure Preferences`（真机验证：Profile 21 的 Secure Preferences 里搜不到扩展 ID）。解压扩展的记录在同文件夹的 `Preferences` 里（`extensions.settings.<扩展 ID>`，`location: 4` + `path` 字段）。现在主证据改查 `Preferences`，`Secure Preferences` 和 `Local Extension Settings\<扩展 ID>` 仍保留作补充证据；匹配时还会把 `Preferences` 里的加载路径打印出来，能确认 Chrome 实际加载的是不是更新脚本维护的那份；扫了几个 User Data 目录、几个身份可读也会打印，找不到时从输出就能看出原因。
 
 工作原理：
 
@@ -121,7 +123,7 @@ v0.3.1 修了第 7 步找 Chrome 的两个 bug：(1) 扫描结果误存在 Power
 
 用户电脑上有多个 Chrome 身份，Gemini 和 YixiuBridge 只装在其中一个上。一键启动**绝不会**无条件打开默认 Chrome，也**绝不会**杀 chrome.exe、关任何窗口：
 
-1. **绝不写死路径。** 每次运行时动态发现：先找 `chrome.exe`（注册表 App Paths、`(Get-Command chrome).Path`、标准路径，Program Files 与 Program Files (x86) 都查，正式版/Beta/Canary 各通道都查），再扫 `%LOCALAPPDATA%\Google\Chrome\User Data` 下各身份文件夹的 `Secure Preferences`，找含有扩展 ID `alcjfcjfkfhfacgofhgoenljfenbcgcel` 的身份目录名（如 `Profile 21`）。用户随时加新账号、新浏览器也不怕。
+1. **绝不写死路径。** 每次运行时动态发现：先找 `chrome.exe`（注册表 App Paths、`(Get-Command chrome).Path`、标准路径，Program Files 与 Program Files (x86) 都查，正式版/Beta/Canary 各通道都查），再扫 `%LOCALAPPDATA%\Google\Chrome\User Data` 下各身份文件夹的 `Preferences`（主证据：解压扩展记在 `extensions.settings.<扩展 ID>`，`location: 4` + `path` 字段）、`Secure Preferences`（商店安装的扩展）和 `Local Extension Settings\<扩展 ID>` 目录，找含有扩展 ID `alcjfcjfkfhfacgofhgoenljfenbcgcel` 的身份目录名（如 `Profile 21`）。用户随时加新账号、新浏览器也不怕。选中身份时会把匹配证据和扩展加载路径都打印出来。
 2. **只开那一个。** 用 `chrome.exe --profile-directory="<找到的目录名>" https://gemini.google.com` 启动；如果该身份的 Chrome 已在运行，这条命令只会把标签页交给已有的那个实例，不会动别的身份。启动前先查已有 `chrome.exe` 进程的命令行是否已含该身份目录，已在运行就不重复开。
 3. **多个身份都装了插件时**：优先选已有进程在运行的那个匹配身份；都没在运行就选匹配身份里 `Preferences` 最近修改的那个；选了哪个、为什么都写进日志。上次选中的身份目录会存在 `~/.yixiubridge/config.json` 的 `last_chrome_profile` 里，但**只做平局时的参考**——每次运行都重新扫描，以新扫描结果为准，新加的账号以新结果为准。
 4. **定位不到时**：不启动任何浏览器，只完成磁盘更新 + 桥与 runner 的重启，并打印一句清楚的话，让用户自己打开平时用 Gemini 的那个 Chrome。插件靠定时自检会自动重载，任务会等插件连上再做，不会丢。
@@ -161,6 +163,7 @@ npm run check     # node --check 全部 JS 文件
 - v0.2（已做完）：`list_models` + `ask_gemini` 选模型/思考等级 + muse-runner（Muse 经 GitHub 任务通道直接指挥 Gemini）
 - v0.3（已做完）：Gemini 发送按钮修复（按 `arrow_upward` 图标定位 + 放宽搜索 + 失败自带诊断）+ 一键更新/启动（双击 `一键启动.bat`）+ 插件自动重载（`disk_version` + alarms 自检）
 - v0.3.1（已做完）：修一键启动第 7 步（`$matches` 自动变量 bug、Secure Preferences 读不到时告警 + `Local Extension Settings` 第二证据、找不到身份绝不乱开浏览器、报错按步骤如实汇报）+ 下载后新版脚本自动接管 + **版本自检**（见下）
+- v0.3.2（已做完）：修一键启动第 7 步的证据来源（解压扩展不在 Secure Preferences 里，主证据改查 `Preferences` 的 `extensions.settings.<ID>`，location 4 + path；匹配时打印加载路径与匹配证据；扫描统计可自诊）
 - v0.4：Claude / ChatGPT 网页版适配器 + 任务路由表（按任务类型选模型）+ 肌肉记忆（重复任务省 token）
 - v0.5：接进 Muse 团队 —— 桥服务放 VPS，每位组长一个 Chrome Profile，操作留审计日志
 
