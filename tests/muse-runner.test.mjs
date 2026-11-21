@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   parseTask,
+  parseThinking,
   taskFilePaths,
   logFilePath,
   buildLogEntry,
@@ -18,6 +19,7 @@ import {
   createBridgeCaller,
   processOneTask,
   DEFAULT_MODEL,
+  DEFAULT_THINKING,
   loadConfig,
   saveConfig,
   createFileLogger,
@@ -842,4 +844,72 @@ test('processOneTask calls the chrome opener when no extension is connected, and
   const res2 = await processOneTask({ github, bridge: bridgeDown, log: () => {}, chromeOpener: opener });
   assert.equal(res2.status, 'bridge-down');
   assert.deepEqual(openedFor, ['t1'], 'no Chrome window when the bridge itself is down');
+});
+
+// ---------- thinking level default (v0.4.1) ----------
+// User's standing preference (2026-11-21): Gemini's 思考等级 prefers 高.
+// The bridge + adapter already accepted a `thinking` param (tools.js,
+// gemini-web.js selectThinkingLevel); the runner never sent one, so this
+// wires it through with 高 as the default.
+
+test('parseThinking accepts 高/中/低 and English aliases, rejects the rest', () => {
+  assert.equal(parseThinking('高'), '高');
+  assert.equal(parseThinking('中'), '中');
+  assert.equal(parseThinking('低'), '低');
+  assert.equal(parseThinking('high'), '高');
+  assert.equal(parseThinking('Medium'), '中');
+  assert.equal(parseThinking('LOW'), '低');
+  assert.equal(parseThinking('  高  '), '高');
+  assert.equal(parseThinking(null), null);
+  assert.equal(parseThinking(undefined), null);
+  assert.equal(parseThinking(''), null);
+  assert.throws(() => parseThinking('超高'), /thinking must be 高\/中\/低/);
+  assert.throws(() => parseThinking(123), /thinking must be a string/);
+  assert.equal(parseTask(taskJson('t9', 'q', { thinking: '中' })).thinking, '中');
+  assert.equal(parseTask(taskJson('t9', 'q')).thinking, null);
+  assert.equal(DEFAULT_THINKING, '高');
+});
+
+test('task without thinking asks with 高 and records it in the done file + log', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge();
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.equal(bridge.calls.find((c) => c.op === 'ask').thinking, '高', 'no thinking in task -> 高 default');
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').asked_thinking, '高');
+  const today = new Date();
+  const logPath = 'tasks/log/' + today.getFullYear() + '-' + String(today.getMonth() + 1).padStart(2, '0') + '-' + String(today.getDate()).padStart(2, '0') + '.json';
+  assert.equal(readRepo(gh.files, logPath)[0].asked_thinking, '高');
+  assert.equal(res.askedThinking, '高');
+});
+
+test('task with an explicit thinking level passes it through', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q', { thinking: '低' }), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge();
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.equal(bridge.calls.find((c) => c.op === 'ask').thinking, '低');
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').asked_thinking, '低');
+});
+
+test('createBridgeCaller.ask sends thinking in the /call body', async () => {
+  let sentBody = null;
+  const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith('/call')) {
+      sentBody = JSON.parse(opts.body);
+      return jsonResponse({ ok: true, result: { answer: 'a', model: 'Neon', elapsed_ms: 10, adapter_version: '0.3.1' } });
+    }
+    return jsonResponse({}, 404);
+  };
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10 });
+  await bridge.ask({ prompt: 'q', model: 'Neon', thinking: '高', timeoutMs: 30000 });
+  assert.equal(sentBody.tool, 'ask_gemini');
+  assert.equal(sentBody.params.thinking, '高');
+  assert.equal(sentBody.params.model, 'Neon');
 });
