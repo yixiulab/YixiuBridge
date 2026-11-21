@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.1.0';
+    this.version = opts.version || '0.2.0';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -81,6 +81,7 @@
         case 'tabs_context': return { ok: true, result: await this._tabsContext() };
         case 'navigate': return { ok: true, result: await this._navigate(params) };
         case 'read_page': return { ok: true, result: await this._readPage() };
+        case 'list_models': return { ok: true, result: await this._listModels() };
         case 'ask_gemini': return { ok: true, result: await this._askGemini(params) };
         case 'get_answer': return { ok: true, result: this._getAnswer(params) };
         default: return { ok: false, error: 'unknown tool: ' + tool };
@@ -164,6 +165,34 @@
     return false;
   };
 
+  // Find a Gemini tab (open one if needed) and wait until its content
+  // script answers. Shared by ask_gemini and list_models.
+  Router.prototype._ensureGeminiTab = async function () {
+    var tab = await this._findGeminiTab();
+    if (!tab) {
+      tab = await chrome.tabs.create({ url: C.GEMINI_URL, active: false });
+    }
+    var ready = await this._waitForTabReady(tab.id, 30000);
+    if (!ready) throw new Error('Gemini tab did not finish loading within 30s');
+    var csReady = await this._pingContentScript(tab.id, 30000);
+    if (!csReady) {
+      throw new Error('Gemini content script did not answer — are you logged in to gemini.google.com in this Chrome profile?');
+    }
+    return tab;
+  };
+
+  Router.prototype._listModels = async function () {
+    var tab = await this._ensureGeminiTab();
+    var res;
+    try {
+      res = await chrome.tabs.sendMessage(tab.id, { from: 'yixiubridge-sw', tool: 'list_models' });
+    } catch (e) {
+      throw new Error('list_models: could not reach the Gemini content script: ' + e.message);
+    }
+    if (!res || !res.ok) throw new Error('list_models: ' + ((res && res.error) || 'content script returned no result'));
+    return res.result;
+  };
+
   Router.prototype._askGemini = async function (params) {
     var prompt = params.prompt;
     if (!prompt || !String(prompt).trim()) throw new Error('ask_gemini: prompt is empty');
@@ -172,23 +201,14 @@
     if (timeoutS < 5) timeoutS = 5;
     var timeoutMs = timeoutS * 1000;
 
-    var tab = await this._findGeminiTab();
-    if (!tab) {
-      tab = await chrome.tabs.create({ url: C.GEMINI_URL, active: false });
-    }
-    var ready = await this._waitForTabReady(tab.id, 30000);
-    if (!ready) throw new Error('ask_gemini: Gemini tab did not finish loading within 30s');
-    var csReady = await this._pingContentScript(tab.id, 30000);
-    if (!csReady) {
-      throw new Error('ask_gemini: Gemini content script did not answer — are you logged in to gemini.google.com in this Chrome profile?');
-    }
+    var tab = await this._ensureGeminiTab();
 
     var taskId = this._newTaskId();
     this.tasks.set(taskId, { status: 'running', startedAt: Date.now() });
     try {
       await chrome.tabs.sendMessage(tab.id, {
         from: 'yixiubridge-sw', tool: 'ask_gemini', taskId: taskId,
-        params: { prompt: String(prompt), timeout_s: timeoutS },
+        params: { prompt: String(prompt), timeout_s: timeoutS, model: params.model || undefined, thinking: params.thinking || undefined },
       });
     } catch (e) {
       this._setTask(taskId, { status: 'failed', error: 'could not start ask in Gemini tab: ' + e.message });
