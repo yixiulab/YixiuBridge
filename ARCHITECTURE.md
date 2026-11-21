@@ -92,7 +92,7 @@ AI --tools/call--> MCP server --POST /call--> bridge --SSE tool_call--> 插件
 只动装了 YixiuBridge 扩展的那一个 Chrome 身份，绝不写死路径：
 
 - **发现 chrome.exe**：注册表 App Paths（HKLM + HKCU）→ `(Get-Command chrome).Path` → 标准路径（Program Files / Program Files (x86) / LOCALAPPDATA，正式版、Chrome Beta、Chrome SxS 各通道都查）。按 exe 路径推断它用的 User Data 目录（Beta → `Google\Chrome Beta\User Data`，SxS → `Google\Chrome SxS\User Data`，其余 → `Google\Chrome\User Data`）；同一个 User Data 目录只扫一次。
-- **定位身份**：扫各身份文件夹（`Default`、`Profile N`）的 `Secure Preferences`，找含有扩展 ID `alcjfcjfkfhfacgofhgoenljfenbcgcel` 的身份目录名。当前装插件+Gemini 的是 `Profile 21`，但脚本里**不写死**这个名字，每次运行重新发现。
+- **定位身份**：扫各身份文件夹（`Default`、`Profile N`）的 `Preferences`（主证据：解压扩展记在 `extensions.settings.<扩展 ID>`，`location: 4` + `path` 字段——2026-11-21 真机验证，`Secure Preferences` 里根本没有解压扩展的记录，0.3.1 因此扫 72 个身份 0 匹配）、`Secure Preferences`（商店安装的扩展）和 `Local Extension Settings\<扩展 ID>` 目录，找含有扩展 ID `alcjfcjfkfhfacgofhgoenljfenbcgcel` 的身份目录名；匹配时把 `Preferences` 里的加载路径打印出来，能确认 Chrome 实际加载的是不是更新脚本维护的那份。当前装插件+Gemini 的是 `Profile 21`，但脚本里**不写死**这个名字，每次运行重新发现。扫描还会打印 User Data 目录数、身份数和可读的 `Preferences` 数，找不到时从输出就能看出原因。
 - **多个匹配时的选择**：优先选已有 `chrome.exe` 进程在运行的那个匹配身份（查 `Win32_Process` 的命令行是否含 `--profile-directory="<目录名>"`）；都没在运行就选 `Preferences` 最近修改的那个；修改时间相同（或都没有）时参考 `config.json` 里的 `last_chrome_profile`（上次选中的身份，只做平局参考，每次都重新扫描、以新结果为准）。选了哪个、为什么写进日志。
 - **只开那一个**：`chrome.exe --profile-directory="<目录名>" https://gemini.google.com`；已在运行就把标签页交给已有实例。**绝不杀 chrome.exe、绝不关任何窗口。** 定位不到就不启动任何浏览器，只完成磁盘更新 + 桥与 runner 的重启，并打印清楚的话让用户自己打开平时用 Gemini 的那个 Chrome。
 
