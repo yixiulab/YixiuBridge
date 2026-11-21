@@ -1,0 +1,1 @@
+{"builds":[{"changes":"runner 没插件时自己打开 Chrome；service worker 启动时建 keepalive alarm","channel":"stable","date":"2026-11-21","verified_by_muse":true,"version":"0.3.7"},{"changes":"在线更新：只拉改动文件、验完再换、自动回滚、搭建库索引；runner 空闲时每小时查一次稳定版并自己更新；一键启动优先走在线更新","channel":"beta","date":"2026-11-21","verified_by_muse":false,"version":"0.4.0"}]}
