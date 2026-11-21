@@ -8,10 +8,42 @@
   else root.YixiuBridgeConstants = factory();
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
+
+  // Compare two "x.y.z" version strings: -1 if a<b, 0 if equal, 1 if a>b.
+  // Missing parts count as 0; non-numeric suffixes are ignored.
+  function compareSemver(a, b) {
+    function parts(v) {
+      return String(v || '').split('.').map(function (p) {
+        var n = parseInt(p, 10);
+        return isNaN(n) ? 0 : n;
+      });
+    }
+    var pa = parts(a);
+    var pb = parts(b);
+    var len = Math.max(pa.length, pb.length);
+    for (var i = 0; i < len; i++) {
+      var x = pa[i] || 0;
+      var y = pb[i] || 0;
+      if (x < y) return -1;
+      if (x > y) return 1;
+    }
+    return 0;
+  }
+
+  // Should the extension auto-reload? True only when the version on disk
+  // is strictly newer than the running manifest version, and we have not
+  // already reloaded for that disk version (prevents reload loops).
+  function shouldAutoReload(manifestVersion, diskVersion, lastReloadedVersion) {
+    if (!diskVersion) return false;
+    if (compareSemver(diskVersion, manifestVersion) <= 0) return false;
+    if (lastReloadedVersion && compareSemver(diskVersion, lastReloadedVersion) <= 0) return false;
+    return true;
+  }
+
   return {
     // Identity
     EXTENSION_NAME: 'YixiuBridge',
-    EXTENSION_VERSION: '0.2.0',
+    EXTENSION_VERSION: '0.3.0',
     PROTOCOL_VERSION: '1.0.0',
 
     // Local bridge (binds 127.0.0.1 ONLY — never 0.0.0.0, never a public port)
@@ -45,5 +77,9 @@
     TASK_RUNNING: 'running',
     TASK_DONE: 'done',
     TASK_FAILED: 'failed',
+
+    // Version helpers (auto-update)
+    compareSemver: compareSemver,
+    shouldAutoReload: shouldAutoReload,
   };
 });
