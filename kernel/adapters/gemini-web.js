@@ -22,10 +22,24 @@
 //   alone is not enough: the stop button can flicker, and text can pause
 //   mid-stream.
 // - Send verification: after clicking Send, the adapter checks the message
-//   actually left the box (streaming started, box cleared, or a new
-//   response appeared). If not, it retries with an Enter keydown, then
-//   fails fast with a clear error instead of waiting out the full timeout
-//   for a message that was never sent.
+//   actually left the box — STRONG evidence only: streaming started, the
+//   box cleared, or a NEW genuine model response appeared (new/changed vs
+//   the pre-fill baseline, inside a real response container, never
+//   home-screen text — v0.3.3, task -006: the old "any text changed"
+//   heuristic counted a re-rendered home screen as "sent", and the
+//   home-screen greeting was then returned as the "answer"). The live-text
+//   branch also covers short answers whose streaming already finished
+//   inside sendCheckMs. If not sent, it retries with an Enter keydown,
+//   then fails fast with a clear error instead of waiting out the full
+//   timeout for a message that was never sent.
+// - Home-screen guard (v0.3.3, task -006): getLatestResponseText reads
+//   ONLY genuine model-response containers (scoped to the conversation
+//   container when it exists) and never returns home-screen text (the
+//   hero greeting / suggestion chips are filtered out). waitForCompletion
+//   compares against a baseline captured before the prompt was filled, so
+//   pre-existing page text can never be mistaken for this turn's answer,
+//   and fails with a clear "no response appeared" error when no NEW model
+//   text ever shows up.
 // - Send-button discovery (v0.3, ground truth from the user's real page,
 //   2026-11-21): the real Send button is an Angular Material button with
 //   NO usable aria-label — it carries a <mat-icon
@@ -189,7 +203,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.3.2';
+  var ADAPTER_VERSION = '0.3.3';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -245,23 +259,42 @@
     } catch (e) { /* event dispatch is best-effort */ }
   }
 
-  // Fallback submit: an Enter keydown on the prompt box, the way a user
+  // Fallback submit: an Enter keypress on the prompt box, the way a user
   // submits. Some layouts only wire Enter, or the clicked button turns out
   // to be a decoy (e.g. a "Send feedback" button that also matches).
+  // Hardened (v0.3.3): focus the editable element first, then dispatch a
+  // full keydown + keypress + keyup sequence with a proper Enter event
+  // (key/code 'Enter', keyCode 13, bubbles, cancelable) on the element
+  // itself — not on a wrapper. Some pages only listen for keydown, others
+  // for keyup; sending the whole sequence covers both. keyCode/which are
+  // set in the init dict and, where the event object allows it, re-applied
+  // with defineProperty (the KeyboardEvent constructor ignores keyCode in
+  // its init dict in real browsers). A listener throwing must not break
+  // the sequence.
   function dispatchEnter(box, win) {
+    var el = box && box.el ? box.el : box;
+    if (!el || typeof el.dispatchEvent !== 'function') return;
     var W = win || (typeof window !== 'undefined' ? window : globalThis);
-    try {
-      var ev;
-      if (typeof W.KeyboardEvent === 'function') {
-        ev = new W.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true });
-      } else if (typeof W.Event === 'function') {
-        ev = new W.Event('keydown', { bubbles: true, cancelable: true });
-        ev.key = 'Enter';
-      } else {
-        return;
+    try { if (typeof el.focus === 'function') el.focus(); } catch (e) { /* focus is best-effort */ }
+    var types = ['keydown', 'keypress', 'keyup'];
+    for (var i = 0; i < types.length; i++) {
+      var ev = null;
+      try {
+        if (typeof W.KeyboardEvent === 'function') {
+          ev = new W.KeyboardEvent(types[i], { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true });
+        }
+      } catch (e) { ev = null; }
+      if (!ev && typeof W.Event === 'function') {
+        try {
+          ev = new W.Event(types[i], { bubbles: true, cancelable: true });
+          ev.key = 'Enter'; ev.code = 'Enter'; ev.keyCode = 13; ev.which = 13;
+        } catch (e2) { ev = null; }
       }
-      box.dispatchEvent(ev);
-    } catch (e) { /* best effort */ }
+      if (!ev) continue;
+      try { Object.defineProperty(ev, 'keyCode', { value: 13 }); } catch (e) { /* already set */ }
+      try { Object.defineProperty(ev, 'which', { value: 13 }); } catch (e) { /* already set */ }
+      try { el.dispatchEvent(ev); } catch (e) { /* a listener throwing must not break the sequence */ }
+    }
   }
 
   function createAdapter(doc, opts) {
@@ -485,12 +518,55 @@
       return !!stop.el;
     }
 
+    // Start-of-text prefixes of the Gemini home screen (hero greeting), in
+    // the languages the page shows. A genuine model answer essentially
+    // never STARTS with one of these; the home screen always does.
+    // Normalised (lowercase, whitespace-collapsed) before comparing, and
+    // only a prefix match counts — an answer that merely mentions one of
+    // these phrases mid-text is unaffected.
+    var HOME_HERO_PREFIXES = [
+      '需要我为你做些什么',
+      '有什么可以帮你',
+      '我能帮你做什么',
+      'what can i help with',
+      'how can i help you',
+      'how can i help',
+    ];
+    function isHomeScreenText(t) {
+      if (!t) return false;
+      var low = String(t).toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!low) return false;
+      for (var i = 0; i < HOME_HERO_PREFIXES.length; i++) {
+        if (low.indexOf(HOME_HERO_PREFIXES[i]) === 0) return true;
+      }
+      return false;
+    }
+
+    // The container a real model turn renders into. On the home screen
+    // there is no turn yet, so the container is empty (or absent) — scoping
+    // the response query to it keeps the hero greeting and the suggestion
+    // chips (which live outside the conversation) out of the answer.
+    // Falls back to the whole document when no conversation container
+    // exists; the home-screen filter below still applies there.
+    function responseScope() {
+      var c = queryFirst(doc, SELECTORS.CONVERSATION);
+      return c.el || doc;
+    }
+
+    function getResponseEls() {
+      return queryAll(responseScope(), SELECTORS.RESPONSE_TEXT);
+    }
+
+    // Genuine model-response texts only: scoped to the conversation
+    // container, and home-screen text (hero greeting / suggestion chips)
+    // is filtered out. On the home screen with no conversation this
+    // returns [] — never the suggestions (task -006).
     function getAllResponses() {
-      var els = queryAll(doc, SELECTORS.RESPONSE_TEXT);
+      var els = getResponseEls();
       var out = [];
       for (var i = 0; i < els.length; i++) {
         var t = textOf(els[i]);
-        if (t) out.push(t);
+        if (t && !isHomeScreenText(t)) out.push(t);
       }
       return out;
     }
@@ -498,6 +574,38 @@
     function getLatestResponseText() {
       var all = getAllResponses();
       return all.length ? all[all.length - 1] : '';
+    }
+
+    // Snapshot of the response elements (and their text) BEFORE the prompt
+    // is filled. waitForCompletion only accepts text that is NEW or
+    // CHANGED against this baseline — text that was already on the page
+    // (the home screen, a previous turn) can never be reported as this
+    // turn's answer.
+    function captureResponseBaseline() {
+      var out = [];
+      var els = getResponseEls();
+      for (var i = 0; i < els.length; i++) out.push({ el: els[i], text: textOf(els[i]) });
+      return out;
+    }
+
+    // Response texts that are new or changed since the baseline (and not
+    // home-screen text). Empty when nothing new appeared — the signal
+    // waitForCompletion uses to fail with "no response appeared" instead
+    // of returning pre-existing page text as an answer.
+    function getLiveResponses(baseline) {
+      var out = [];
+      var els = getResponseEls();
+      for (var i = 0; i < els.length; i++) {
+        var t = textOf(els[i]);
+        if (!t || isHomeScreenText(t)) continue;
+        var found = false;
+        var baseText = null;
+        for (var j = 0; j < baseline.length; j++) {
+          if (baseline[j].el === els[i]) { found = true; baseText = baseline[j].text; break; }
+        }
+        if (!found || baseText !== t) out.push(t);
+      }
+      return out;
     }
 
     // ---------- model selection (v0.2) ----------
@@ -789,35 +897,70 @@
 
     // ---------- /model selection ----------
 
-    // Wait until streaming ends: stop button gone AND text stable for stableMs.
-    async function waitForCompletion(startedAt, deadline) {
-      var lastText = '';
+    // Wait until streaming ends: stop button gone AND the NEW response
+    // text stable for stableMs. `baseline` (from captureResponseBaseline,
+    // taken before the prompt was filled) is what makes this safe: only
+    // text that is new or changed since the baseline counts. When no NEW
+    // model text ever appears — e.g. the prompt was never really sent and
+    // the page is still on the home screen — this FAILS with a clear
+    // "no response appeared" error instead of returning pre-existing page
+    // text as an answer (task -006). When new text appeared but never
+    // stabilised, the old timeout error (with the partial answer) is kept.
+    async function waitForCompletion(startedAt, deadline, baseline) {
+      baseline = baseline || [];
+      var lastLive = '';
       var stableSince = null;
       var polls = 0;
+      var everLive = false;
+      // Evaluate once up front: the caller may have spent the whole
+      // timeout budget on send verification (sendCheckMs), so the deadline
+      // can already be past when we get here — without this, the loop
+      // would never run and a real partial answer would be misreported as
+      // "no response appeared".
+      var firstLive = getLiveResponses(baseline);
+      if (firstLive.length) {
+        everLive = true;
+        lastLive = firstLive[firstLive.length - 1];
+      }
       while (Date.now() < deadline) {
         await sleep(pollMs);
         polls++;
         var streaming = isStreaming();
-        var text = getLatestResponseText();
-        if (!streaming) {
-          if (text && text === lastText) {
+        var live = getLiveResponses(baseline);
+        var text = live.length ? live[live.length - 1] : '';
+        if (text) everLive = true;
+        if (!streaming && text) {
+          if (text === lastLive) {
             if (stableSince === null) stableSince = Date.now();
             if (Date.now() - stableSince >= stableMs) {
               return { ok: true, answer: text, polls: polls, elapsedMs: Date.now() - startedAt };
             }
           } else {
-            lastText = text;
+            lastLive = text;
             stableSince = null;
           }
         } else {
-          lastText = text;
+          // Still streaming, or nothing new yet: keep the newest text as
+          // the partial answer, but never finish while the stop button is
+          // up, and never carry a stale "stable" across a gap with no
+          // live text.
+          lastLive = text || '';
           stableSince = null;
         }
+      }
+      if (!everLive) {
+        return {
+          ok: false,
+          error: 'gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: ' + ADAPTER_VERSION + ']',
+          partial: '',
+          polls: polls,
+          elapsedMs: Date.now() - startedAt,
+        };
       }
       return {
         ok: false,
         error: 'gemini answer did not finish within timeout (' + Math.round((deadline - startedAt) / 1000) + 's) — still streaming or page changed',
-        partial: getLatestResponseText(),
+        partial: lastLive,
         polls: polls,
         elapsedMs: Date.now() - startedAt,
       };
@@ -858,17 +1001,29 @@
         if (!box.el) {
           return { ok: false, error: 'gemini prompt box not found — UI may have changed (tried: ' + SELECTORS.PROMPT_BOX.join(' | ') + ')' };
         }
-        var beforeText = getLatestResponseText();
+        // Baseline of the response area BEFORE the prompt is filled:
+        // waitForCompletion only accepts text that is new or changed
+        // against this, so pre-existing page text (home screen, previous
+        // turn) can never be reported as this turn's answer (task -006).
+        var baseline = captureResponseBaseline();
         fillPromptBox(box.el, String(prompt), win);
         // Verify the message actually left the box: a click can land on a
-        // decoy button, or the page can ignore it. Sent = streaming started,
-        // or the box cleared, or a new response appeared.
+        // decoy button, or the page can ignore it. Sent = streaming
+        // started, or the box cleared, or a NEW genuine model response
+        // appeared since the prompt was filled. STRONG evidence only
+        // (v0.3.3): the third branch is NOT the old "any text changed"
+        // heuristic — getLiveResponses() only counts text that is new or
+        // changed against the pre-fill baseline, inside a real response
+        // container, and never home-screen text. That keeps the -006 false
+        // positive out (a re-rendered home screen is baseline text or
+        // hero text, never live) while still covering short answers whose
+        // streaming already finished inside sendCheckMs (stop button gone,
+        // box not yet cleared in some layouts).
         var confirmSent = async function () {
           await sleep(sendCheckMs);
           if (isStreaming()) return true;
           if (!textOf(box.el)) return true;
-          var now = getLatestResponseText();
-          if (now && now !== beforeText) return true;
+          if (getLiveResponses(baseline).length) return true;
           return false;
         };
         var send = findSendButton(box.el);
@@ -913,7 +1068,7 @@
             return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed.' };
           }
         }
-        var done = await waitForCompletion(startedAt, deadline);
+        var done = await waitForCompletion(startedAt, deadline, baseline);
         if (!done.ok) return done;
         if (!done.answer) {
           return { ok: false, error: 'gemini answer finished but no response text could be extracted — UI may have changed', polls: done.polls, elapsedMs: done.elapsedMs };
@@ -953,5 +1108,5 @@
     };
   }
 
-  return { createAdapter: createAdapter, ADAPTER_VERSION: ADAPTER_VERSION, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS, RECOMMENDED_MODEL: RECOMMENDED_MODEL };
+  return { createAdapter: createAdapter, ADAPTER_VERSION: ADAPTER_VERSION, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS, RECOMMENDED_MODEL: RECOMMENDED_MODEL, dispatchEnter: dispatchEnter };
 });
