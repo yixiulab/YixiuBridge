@@ -1,0 +1,5 @@
+{
+  "id": "task-20261121-pomodoro-003",
+  "error": "ask_gemini failed: ask_gemini: gemini send button not found — UI may have changed (tried: button[aria-label=\"Send message\"] | button[aria-label*=\"Send\"] | button[data-test-id=\"send-button\"] | button[aria-label*=\"send\"] | button[aria-label=\"发送消息\"] | button[aria-label*=\"发送\"] | button.send-button)",
+  "failed_at": "2026-11-21T13:38:43.982Z"
+}
