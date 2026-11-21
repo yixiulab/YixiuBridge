@@ -263,8 +263,8 @@ test('/status reports the version on disk (disk_version, read fresh from package
   assert.equal(res.status, 200);
   const st = await res.json();
   assert.equal(st.ok, true);
-  assert.equal(st.version, '0.3.7');
-  assert.equal(st.disk_version, '0.3.7');
+  assert.equal(st.version, '0.4.0');
+  assert.equal(st.disk_version, '0.4.0');
 });
 
 test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adapter -> mock page)', async () => {
