@@ -85,6 +85,21 @@ class SimulatedExtension {
         case 'read_page':
           out = { ok: true, result: { title: 'Gemini (mock)', url: 'https://gemini.google.com/app', textExcerpt: 'mock page', textLength: 9 } };
           break;
+        case 'list_models':
+          out = {
+            ok: true,
+            result: {
+              current: 'Neon',
+              buttonText: 'Neon 高',
+              models: [
+                { label: '自动', codename: null, description: '根据需求调整回答', selected: false, locked: false },
+                { label: '日常帮助', codename: 'Hydrogen', description: '', selected: false, locked: false },
+                { label: '更深入的分析', codename: 'Neon', description: '', selected: true, locked: false },
+                { label: '代码和复杂工作', codename: 'Carbon', description: '', selected: false, locked: true },
+              ],
+            },
+          };
+          break;
         case 'ask_gemini':
           out = { ok: true, result: await this._askGemini(params) };
           break;
@@ -215,7 +230,7 @@ test('MCP initialize is rejected without a pairing window', async () => {
   rpc.child.kill();
 });
 
-test('pairing window authorizes the first client; tools/list exposes the 6 MVP tools', async () => {
+test('pairing window authorizes the first client; tools/list exposes the 7 tools', async () => {
   const res = await fetch(bridgeUrl + '/pair/start', { method: 'POST' });
   assert.equal(res.status, 200);
   const rpc = spawnMcp();
@@ -224,7 +239,7 @@ test('pairing window authorizes the first client; tools/list exposes the 6 MVP t
   rpc.notify('notifications/initialized');
   const list = await rpc.call('tools/list', {});
   const names = list.tools.map((t) => t.name);
-  for (const n of ['ping', 'tabs_context', 'navigate', 'read_page', 'ask_gemini', 'get_answer']) {
+  for (const n of ['ping', 'tabs_context', 'navigate', 'read_page', 'list_models', 'ask_gemini', 'get_answer']) {
     assert.ok(names.includes(n), 'missing tool ' + n);
   }
   rpc.child.kill();
@@ -251,6 +266,21 @@ test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adap
   const res = JSON.parse(out.content[0].text);
   assert.equal(res.answer, '4 is the answer.');
   assert.equal(res.model, 'gemini-web');
+  rpc.child.kill();
+});
+
+test('list_models round-trips through MCP and ask_gemini accepts a model param', async () => {
+  const rpc = spawnMcp();
+  await rpc.call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'TestClient', version: '1.0' } });
+  const out = await rpc.call('tools/call', { name: 'list_models', arguments: {} });
+  assert.equal(out.isError, false);
+  const res = JSON.parse(out.content[0].text);
+  assert.equal(res.current, 'Neon');
+  assert.equal(res.models.length, 4);
+  assert.equal(res.models.find((m) => m.codename === 'Carbon').locked, true);
+  const ask = await rpc.call('tools/call', { name: 'ask_gemini', arguments: { prompt: 'What is 2+2?', model: 'Neon', timeout_s: 30 } });
+  assert.equal(ask.isError, false);
+  assert.equal(JSON.parse(ask.content[0].text).answer, '4 is the answer.');
   rpc.child.kill();
 });
 
