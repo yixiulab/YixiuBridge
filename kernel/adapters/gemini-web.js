@@ -26,6 +26,19 @@
 //   response appeared). If not, it retries with an Enter keydown, then
 //   fails fast with a clear error instead of waiting out the full timeout
 //   for a message that was never sent.
+// - Model selection (v0.2, built from the user's real screenshot of the
+//   Gemini web model menu, Chinese UI):
+//     自动 / 根据需求调整回答
+//     日常帮助 / 4 Hydrogen
+//     更深入的分析 / 4 Neon        <- currently selected (checkmark)
+//     代码和复杂工作 / 4 Carbon     <- LOCKED (lock icon, needs a paid plan?)
+//   plus a 思考等级 (thinking level) submenu. The picker button at the top
+//   shows the current model, e.g. "Neon 高" (model name + thinking level),
+//   so selection is verified by SUBSTRING match on the button text, never
+//   by exact equality. A locked model is never clicked: selectModel fails
+//   fast with a clear error naming the unlocked alternatives. Switching
+//   models may start a new chat in Gemini web; ask_gemini asks one
+//   self-contained question per call, so it does not depend on history.
 
 // - The adapter NEVER throws a bare error from ask(): it returns a structured
 //   { ok:false, error } object, and the tool handler turns that into an MCP
@@ -82,7 +95,38 @@
       'main',
       'body',
     ],
+    // The model switcher button at the top of the Gemini page. It shows the
+    // current model, e.g. "Neon 高" (model name + thinking level). The
+    // data-test-id / aria-label entries are best-effort; the text scan in
+    // findModelPickerButton() is the fallback (the button always shows a
+    // model name). NOTE: no generic [aria-haspopup="menu"] fallback here —
+    // too broad, it could open the wrong menu.
+    MODEL_PICKER_BUTTON: [
+      'button[data-test-id="model-switcher"]',
+      'button[aria-label*="模型"]',
+      'button[aria-label*="model"]',
+      'button[aria-label*="Model"]',
+      '[data-test-id="model-picker"]',
+    ],
+    // Menu items: one per model. role=menuitemradio is the most likely shape
+    // (a single-choice list); menuitem/option are the fallbacks. The
+    // 思考等级 (thinking level) submenu items match these too and are
+    // filtered out by parseModelItem / selectThinkingLevel.
+    MODEL_MENU_ITEMS: [
+      '[role="menuitemradio"]',
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[data-test-id*="model-option"]',
+    ],
   };
+
+  // Model codenames seen in the real Gemini web menu (Nov 2026). The "4"
+  // badge in the UI ("4 Hydrogen") is a version mark, not part of the name.
+  var KNOWN_MODELS = ['Hydrogen', 'Neon', 'Carbon'];
+  // Chinese labels of the same menu items, in menu order.
+  var MODEL_LABELS = ['自动', '日常帮助', '更深入的分析', '代码和复杂工作'];
+  // Recommended high model: the highest unlocked item on the user's account.
+  var RECOMMENDED_MODEL = 'Neon';
 
   var DEFAULTS = {
     timeoutMs: 180000,
@@ -201,6 +245,286 @@
       return all.length ? all[all.length - 1] : '';
     }
 
+    // ---------- model selection (v0.2) ----------
+
+    // Visible on screen? Real DOM: getClientRects() is empty for
+    // display:none. Fake DOM (tests): no getClientRects/offsetParent, so
+    // anything present in the document counts as visible.
+    function isVisible(el) {
+      if (!el) return false;
+      try {
+        if (typeof el.getClientRects === 'function') return el.getClientRects().length > 0;
+      } catch (e) { /* fall through */ }
+      if (typeof el.offsetParent !== 'undefined') return el.offsetParent !== null;
+      return true;
+    }
+
+    function modelCodenameIn(text) {
+      var m = /Hydrogen|Neon|Carbon/i.exec(text || '');
+      if (!m) return null;
+      var c = m[0].toLowerCase();
+      return c.charAt(0).toUpperCase() + c.slice(1);
+    }
+
+    // Parse one menu item element into { label, codename, description,
+    // selected, locked }. Item text looks like "日常帮助 4 Hydrogen",
+    // "自动 根据需求调整回答", or "更深入的分析 4 Neon ✓".
+    function parseModelItem(el) {
+      var text = textOf(el);
+      var codename = modelCodenameIn(text);
+      var cleaned = text.replace(/4?\s*(Hydrogen|Neon|Carbon)/i, ' ').replace(/[✓✔🔒]/g, ' ');
+      var tokens = cleaned.split(/[\s\n]+/).filter(function (t) { return !!t; });
+      var label = tokens.length ? tokens[0] : '';
+      var description = tokens.slice(1).join(' ');
+      var selected = el.getAttribute('aria-checked') === 'true'
+        || el.getAttribute('aria-selected') === 'true'
+        || (el.classList && el.classList.contains && el.classList.contains('selected'))
+        || (el.querySelector && !!el.querySelector('[class*="check"], [aria-label*="check"], [aria-label*="已选"]'))
+        || text.indexOf('✓') !== -1 || text.indexOf('✔') !== -1;
+      var locked = el.getAttribute('aria-disabled') === 'true'
+        || (el.classList && el.classList.contains && el.classList.contains('locked'))
+        || (el.querySelector && !!el.querySelector('[class*="lock"], [aria-label*="lock"], [aria-label*="锁定"]'))
+        || text.indexOf('🔒') !== -1;
+      return { label: label, codename: codename, description: description, selected: selected, locked: locked, _el: el };
+    }
+
+    function findModelPickerButton() {
+      var found = queryFirst(doc, SELECTORS.MODEL_PICKER_BUTTON);
+      if (found.el) return found;
+      // Fallback: scan buttons for one whose visible text names a model —
+      // the picker always shows the current model, e.g. "Neon 高".
+      var cands = queryAll(doc, ['button', '[role="button"]']);
+      for (var i = 0; i < cands.length; i++) {
+        if (!isVisible(cands[i])) continue;
+        var t = textOf(cands[i]);
+        if (!t) continue;
+        if (modelCodenameIn(t) || t.indexOf('自动') !== -1) {
+          return { el: cands[i], selector: 'button(text:' + t.slice(0, 20) + ')' };
+        }
+      }
+      return { el: null, selector: null };
+    }
+
+    function getCurrentModelText() {
+      var btn = findModelPickerButton();
+      return btn.el ? textOf(btn.el) : '';
+    }
+
+    // All visible model-menu items right now (document-wide: the menu may
+    // live in a portal, and the thinking-level submenu is a second menu).
+    function readModelMenuItems() {
+      var els = queryAll(doc, SELECTORS.MODEL_MENU_ITEMS);
+      var seen = [];
+      var out = [];
+      for (var i = 0; i < els.length; i++) {
+        if (seen.indexOf(els[i]) !== -1) continue;
+        seen.push(els[i]);
+        if (!isVisible(els[i])) continue;
+        out.push(els[i]);
+      }
+      return out;
+    }
+
+    async function openModelMenu() {
+      var btn = findModelPickerButton();
+      if (!btn.el) {
+        return { ok: false, error: 'gemini model picker button not found — UI may have changed (tried: ' + SELECTORS.MODEL_PICKER_BUTTON.join(' | ') + ', plus buttons showing a model name)' };
+      }
+      try { btn.el.click(); } catch (e) {
+        return { ok: false, error: 'gemini model picker click failed: ' + (e && e.message ? e.message : String(e)) };
+      }
+      await sleep(400);
+      var items = readModelMenuItems();
+      if (!items.length) {
+        return { ok: false, error: 'gemini model menu did not open — the picker button may be wrong, or the UI changed' };
+      }
+      return { ok: true, button: btn, items: items };
+    }
+
+    async function closeModelMenu() {
+      // Escape first (real page closes menus on Escape), then toggle the
+      // picker if the menu is still open.
+      try {
+        var ev;
+        if (typeof win.KeyboardEvent === 'function') {
+          ev = new win.KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true, cancelable: true });
+        } else if (typeof win.Event === 'function') {
+          ev = new win.Event('keydown', { bubbles: true, cancelable: true });
+          ev.key = 'Escape';
+        }
+        if (ev) {
+          if (doc.body && doc.body.dispatchEvent) doc.body.dispatchEvent(ev);
+          else if (doc.documentElement && doc.documentElement.dispatchEvent) doc.documentElement.dispatchEvent(ev);
+        }
+      } catch (e) { /* best effort */ }
+      await sleep(200);
+      if (readModelMenuItems().length) {
+        var btn = findModelPickerButton();
+        if (btn.el) {
+          try { btn.el.click(); } catch (e) { /* ignore */ }
+          await sleep(200);
+        }
+      }
+    }
+
+    // Open the picker, read the menu, close it again. Never changes the
+    // selection. Returns { ok, current, buttonText, models: [...] }.
+    async function listModels() {
+      try {
+        var opened = await openModelMenu();
+        if (!opened.ok) return opened;
+        var models = modelItemsFrom(opened.items).map(function (m) {
+          return { label: m.label, codename: m.codename, description: m.description, selected: m.selected, locked: m.locked };
+        });
+        var current = null;
+        for (var i = 0; i < models.length; i++) {
+          if (models[i].selected) { current = models[i].codename || models[i].label; break; }
+        }
+        var buttonText = textOf(opened.button.el);
+        await closeModelMenu();
+        return { ok: true, current: current, buttonText: buttonText, models: models };
+      } catch (e) {
+        try { await closeModelMenu(); } catch (e2) { /* ignore */ }
+        return { ok: false, error: 'gemini list_models error: ' + (e && e.message ? e.message : String(e)) };
+      }
+    }
+
+    function describeModels(items) {
+      return items.map(function (m) {
+        return m.label + (m.codename ? ' (' + m.codename + ')' : '')
+          + (m.locked ? ' [locked]' : '') + (m.selected ? ' [current]' : '');
+      }).join(', ');
+    }
+
+    // A menu item is a model if it carries a codename, or its label is one
+    // of the known Chinese model labels. Anything else (e.g. the 思考等级
+    // submenu trigger) is not a model and must not be listed or selected.
+    function isModelItem(m) {
+      return !!m.codename || MODEL_LABELS.indexOf(m.label) !== -1;
+    }
+
+    function modelItemsFrom(els) {
+      return els.map(parseModelItem).filter(isModelItem);
+    }
+
+    // Select a model by codename ("Neon") or Chinese label ("日常帮助").
+    // Locked models are never clicked. Verifies via the picker button text,
+    // which also carries the thinking level ("Neon 高") — substring match
+    // only, never exact equality.
+    async function selectModel(want) {
+      var wantNorm = String(want || '').trim();
+      if (!wantNorm) return { ok: false, error: 'gemini model name is empty' };
+      var opened = await openModelMenu();
+      if (!opened.ok) return opened;
+      var items = modelItemsFrom(opened.items);
+      var previous = null;
+      for (var p = 0; p < items.length; p++) {
+        if (items[p].selected) { previous = items[p].codename || items[p].label; break; }
+      }
+      var wantLower = wantNorm.toLowerCase();
+      var match = null;
+      var i;
+      for (i = 0; i < items.length; i++) {
+        if (items[i].codename && items[i].codename.toLowerCase() === wantLower) { match = items[i]; break; }
+      }
+      if (!match) {
+        for (i = 0; i < items.length; i++) {
+          if (items[i].label && items[i].label === wantNorm) { match = items[i]; break; }
+        }
+      }
+      if (!match) {
+        for (i = 0; i < items.length; i++) {
+          if (items[i].codename && items[i].codename.toLowerCase().indexOf(wantLower) !== -1) { match = items[i]; break; }
+          if (items[i].label && items[i].label.indexOf(wantNorm) !== -1) { match = items[i]; break; }
+        }
+      }
+      if (!match) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini model "' + wantNorm + '" not found — available models: ' + describeModels(items) };
+      }
+      if (match.locked) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini model "' + (match.codename || match.label) + '" is locked (not unlocked on this account — it may need a paid plan). Pick an unlocked model: ' + describeModels(items) };
+      }
+      if (match.selected) {
+        await closeModelMenu();
+        return { ok: true, model: match.codename || match.label, alreadySelected: true, previous: previous };
+      }
+      try { match._el.click(); } catch (e) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini model click failed for "' + (match.codename || match.label) + '": ' + (e && e.message ? e.message : String(e)) };
+      }
+      await sleep(500);
+      var btnText = getCurrentModelText();
+      var verified = false;
+      if (match.codename) {
+        verified = !!btnText && btnText.toLowerCase().indexOf(match.codename.toLowerCase()) !== -1;
+      } else {
+        // "自动" has no codename; the picker may show 自动, or the model
+        // Auto resolved to. Accept either.
+        verified = !!btnText && (btnText.indexOf(match.label) !== -1
+          || KNOWN_MODELS.some(function (c) { return btnText.indexOf(c) !== -1; }));
+      }
+      if (!verified) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini model selection did not stick — picker still shows "' + (btnText || '') + '" after choosing ' + (match.codename || match.label) };
+      }
+      return { ok: true, model: match.codename || match.label, previous: previous };
+    }
+
+    // Select a thinking level (e.g. "高" / "中" / "低") from the 思考等级
+    // submenu. Best-effort: the submenu layout is not fully known, so a
+    // missing submenu or level fails fast with a clear error instead of
+    // guessing. Verification again uses the picker button text ("Neon 高").
+    async function selectThinkingLevel(level) {
+      var want = String(level || '').trim();
+      if (!want) return { ok: false, error: 'gemini thinking level is empty' };
+      var opened = await openModelMenu();
+      if (!opened.ok) return opened;
+      var trigger = null;
+      for (var i = 0; i < opened.items.length; i++) {
+        if (textOf(opened.items[i]).indexOf('思考') !== -1) { trigger = opened.items[i]; break; }
+      }
+      if (!trigger) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini thinking-level submenu not found in the model menu — the UI may have changed' };
+      }
+      try { trigger.click(); } catch (e) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini thinking-level submenu click failed: ' + (e && e.message ? e.message : String(e)) };
+      }
+      await sleep(400);
+      var levelItems = readModelMenuItems();
+      var foundLevels = [];
+      var match = null;
+      for (var j = 0; j < levelItems.length; j++) {
+        var m = parseModelItem(levelItems[j]);
+        if (m.codename) continue; // a model item, not a level
+        if (MODEL_LABELS.indexOf(m.label) !== -1) continue; // a model item
+        var t = textOf(levelItems[j]).trim();
+        if (t.indexOf('思考') !== -1) continue; // the trigger itself
+        foundLevels.push(t);
+        if (!match && (t === want || t.indexOf(want) !== -1)) match = levelItems[j];
+      }
+      if (!match) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
+      }
+      try { match.click(); } catch (e) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
+      }
+      await sleep(400);
+      var btnText = getCurrentModelText();
+      if (!btnText || btnText.indexOf(want) === -1) {
+        await closeModelMenu();
+        return { ok: false, error: 'gemini thinking level did not stick — picker still shows "' + (btnText || '') + '" after choosing level "' + want + '"' };
+      }
+      return { ok: true, thinking: want };
+    }
+
+    // ---------- /model selection ----------
+
     // Wait until streaming ends: stop button gone AND text stable for stableMs.
     async function waitForCompletion(startedAt, deadline) {
       var lastText = '';
@@ -246,6 +570,19 @@
         if (!prompt || !String(prompt).trim()) {
           return { ok: false, error: 'ask_gemini: prompt is empty' };
         }
+        // Model selection happens BEFORE the prompt box is touched: a
+        // failed selection must not leave a half-filled question behind.
+        // No model given = use whatever the user already selected in the UI.
+        var selectedModel = null;
+        if (askOpts.model) {
+          var sel = await selectModel(askOpts.model);
+          if (!sel.ok) return sel;
+          selectedModel = sel.model;
+        }
+        if (askOpts.thinking) {
+          var th = await selectThinkingLevel(askOpts.thinking);
+          if (!th.ok) return th;
+        }
         var box = findPromptBox();
         if (!box.el) {
           return { ok: false, error: 'gemini prompt box not found — UI may have changed (tried: ' + SELECTORS.PROMPT_BOX.join(' | ') + ')' };
@@ -288,7 +625,7 @@
         if (!done.answer) {
           return { ok: false, error: 'gemini answer finished but no response text could be extracted — UI may have changed', polls: done.polls, elapsedMs: done.elapsedMs };
         }
-        return { ok: true, answer: done.answer, model: DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
+        return { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
       } catch (e) {
         return { ok: false, error: 'gemini adapter error: ' + (e && e.message ? e.message : String(e)) };
       }
@@ -296,15 +633,22 @@
 
     return {
       SELECTORS: SELECTORS,
+      KNOWN_MODELS: KNOWN_MODELS,
+      MODEL_LABELS: MODEL_LABELS,
+      RECOMMENDED_MODEL: RECOMMENDED_MODEL,
       findPromptBox: findPromptBox,
       findSendButton: findSendButton,
       isStreaming: isStreaming,
       getAllResponses: getAllResponses,
       getLatestResponseText: getLatestResponseText,
+      getCurrentModelText: getCurrentModelText,
+      listModels: listModels,
+      selectModel: selectModel,
+      selectThinkingLevel: selectThinkingLevel,
       waitForCompletion: waitForCompletion,
       ask: ask,
     };
   }
 
-  return { createAdapter: createAdapter, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS };
+  return { createAdapter: createAdapter, SELECTORS: SELECTORS, DEFAULTS: DEFAULTS, RECOMMENDED_MODEL: RECOMMENDED_MODEL };
 });
