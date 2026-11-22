@@ -40,5 +40,19 @@
     "elapsed_ms": null,
     "error": "ask_gemini failed: ask_gemini: gemini thinking level did not stick — picker still shows \"Neon\" after choosing level \"高\" [adapter_version: 0.4.1]",
     "at": "2026-11-22T06:47:32.766Z"
+  },
+  {
+    "id": "task-20261122-bridge-042-verify6",
+    "status": "failed",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "answered_model": null,
+    "adapter_version": null,
+    "bridge_version": "0.4.2",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "ask_gemini failed: Gemini content script did not answer even after reloading the tab once — are you logged in to gemini.google.com in this Chrome profile?",
+    "at": "2026-11-22T07:00:12.842Z"
   }
 ]
