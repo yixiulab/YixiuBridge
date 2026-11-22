@@ -288,8 +288,49 @@ test('content script still silent after a reload fails with a clear error', asyn
   });
   const res = await router.handle({ tool: 'list_models', params: {} });
   assert.equal(res.ok, false);
-  assert.match(res.error, /did not answer even after reloading/);
+  assert.match(res.error, /did not answer/);
+  assert.match(res.error, /fresh tab was opened/);
   assert.deepEqual(router._testReloads, [7], 'tab is reloaded once before giving up — never in a loop');
+});
+
+test('content script silent after a reload opens a fresh tab and proceeds (v0.4.3)', async () => {
+  const oldTab = { id: 7, title: 'Gemini', url: 'https://gemini.google.com/app', active: false, status: 'complete' };
+  const freshTab = { id: 8, title: 'Gemini', url: 'https://gemini.google.com/app', active: false, status: 'complete' };
+  const reloads = [];
+  const creates = [];
+  const fakeChrome = {
+    tabs: {
+      query: async () => [oldTab],
+      get: async (tabId) => (tabId === 8 ? freshTab : oldTab),
+      create: async (opts) => { creates.push(opts); return freshTab; },
+      reload: async (tabId) => { reloads.push(tabId); },
+      sendMessage: async (tabId, msg) => {
+        if (msg.tool === 'ping') {
+          // The old tab never answers, even after its reload (discarded /
+          // error page — seen 2026-11-22 verify6/verify7). The fresh tab
+          // answers with matching versions.
+          if (tabId === 8) return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+          throw new Error('Could not establish connection. Receiving end does not exist.');
+        }
+        if (msg.tool === 'list_models') return { ok: true, result: { current: 'Neon', buttonText: 'Neon 高', models: [] } };
+        throw new Error('unexpected tool ' + msg.tool);
+      },
+    },
+  };
+  const Router = loadRouter(fakeChrome);
+  const router = new Router({
+    bridge: { sendTaskUpdate: async () => {} },
+    debugger: { snapshot: async () => ({}) },
+    profile: { id: 'Profile-test', label: 'test' },
+    version: '0.2.0-test',
+    pingTimeoutMs: 50,
+  });
+  const res = await router.handle({ tool: 'list_models', params: {} });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.current, 'Neon');
+  assert.deepEqual(reloads, [7], 'old tab is reloaded once first');
+  assert.equal(creates.length, 1, 'a fresh tab is opened when the reload does not restore the script');
+  assert.equal(creates[0].url, 'https://gemini.google.com/app');
 });
 
 test('ask_gemini success result carries adapter_version through', async () => {
