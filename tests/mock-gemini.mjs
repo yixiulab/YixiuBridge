@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, initialLevel = '高' } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -136,7 +136,13 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     return menu;
   }
 
+  // menuOpensOnClick: 2 simulates the real page (2026-11-22 verify3/verify4)
+  // where the first picker click is swallowed (cold tab) and the menu only
+  // opens on the second click (v0.4.2: openModelMenu polls and retries).
+  let pickerClicks = 0;
   picker.addEventListener('click', () => {
+    pickerClicks++;
+    if (pickerClicks < menuOpensOnClick) return;
     if (menu) closeMenu();
     else doc.body.appendChild(buildMenu());
   });
