@@ -170,3 +170,9 @@ Muse（云端） --GET tasks/done/<id>.answer.json--> GitHub
 ## 思考等级改为非致命（v0.4.2）
 
 0.4.1 让 runner 每次都传 `thinking: 高`，适配器 `selectThinkingLevel` 选完后验按钮文字（须含“高”），验不过就让整个问答失败。真机上两次探针都栽在这儿：第一次是模型选择器找不到（瞬时），第二次选完 高 后按钮仍显示 “Neon”（`gemini thinking level did not stick`），任务直接失败。根因是等级只是偏好、不是问答的前提——0.4.1 之前 runner 从不碰这个设置，问答一直正常。修法：`selectThinkingLevel` 的错误分两类——`invalid-level`（等级名本身不在菜单里，调用方错，照常快速失败）、`apply-failed`（子菜单找不到、点不中、按钮文字不变，UI 问题）；`askImpl` 里只有前者才失败，后者记成 `thinkingWarning`、照常问答，成功结果里带上它；等级验证改为 2 秒内轮询（400ms 读一次不准）。runner 把 `thinkingWarning` 接进 done 文件（`thinking_warning` 字段），所以 done 文件里 `asked_thinking: 高` 配上 `thinking_warning` 才诚实。注意：这只修了“问答不被等级卡住”，等级本身在真机上到底生效没有、按钮为什么不显示 高，仍待拿真实 DOM 证据再查。**同一版还修了模型菜单**：2026-11-22 凌晨 verify3、verify4 两次都死在 `openModelMenu`——点一次、等 400ms、菜单没出现就判失败。改成点一次后 2 秒内轮询（200ms 一次），没开再点一次、再轮询 2 秒；两次都开不了才报错。冷标签页第一次点击被吞掉、菜单开得慢，都能扛住。
+
+## 在线更新后重打包 + 内容脚本无应答时开新页（v0.4.3）
+
+0.4.2 自动装上后问答仍失败，根因是打包缺口：`host/online-updater.mjs` 的 `SKIP_PREFIXES` 跳过 `extension/kernel/`（git 忽略的打包产物），更新后适配器还停在 0.4.1，路由器版本握手（content 与 adapter 版本都须等于扩展版本）永远过不去。修法：runner 的 `runIdleOnlineUpdate` 在 `applyUpdate` 成功后跑 `node scripts/package-extension.mjs` 重打 `extension/kernel/`，打包失败则回滚；桥重启失败回滚后也重打一次（恢复旧适配器）。`repackageExtension` 是可注入的（`packager` 参数），脚本不存在时安静跳过（老安装/测试）。同版还修了路由器：标签页重载后内容脚本仍无应答（verify6/verify7，孤儿脚本、废弃/报错页）时开一个新 Gemini 标签页再试一次；找标签页优先用当前活动页（后台页可能被 Memory Saver 废弃）。2026-11-22 08:53 探针 verify11 成功（Neon、思考高、13 秒回 OK，桥与适配器均为 0.4.3），203 测试全过。
+
+**教训（2026-11-22，用户亲口要求记下、以后不能再出现）**：(1) 在线更新必须包含打包产物——设计时先列出更新程序碰不到的文件，逐个给再生办法；(2) 验证要对准事实本身：思考等级用按钮文字子串匹配验证会误报——verify11 的 done 文件写 高、无警告，但用户截图证明回复 OK 的对话里思考等级打勾的是低。按钮文字是派生显示，真正选中的状态是菜单里打勾项；验证必须读打勾项，汇报要分清“要的”和“实际用的”；(3) 发稳定版要算准 runner 的检查节拍——每小时一次，“无更新”的检查也会把计时重置一小时，0.4.3 同步时 runner 刚查完，结果等了一小时、最后只能让用户双击 .bat；(4) 探针失败先读错误语义（"still an old version" 直接点明适配器过期），不要先猜测 tab/网络；(5) 不要给保证不了的时间承诺。
