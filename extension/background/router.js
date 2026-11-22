@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.16';
+    this.version = opts.version || '0.4.17';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -56,7 +56,7 @@
       // Same rule for `recovered` (v0.4.13): an answer the adapter
       // rescued from the tab after the send checks misjudged must be
       // marked as recovered all the way to the runner's done file.
-      // Same rule for `completedVia` / `streamingFlagStuck` (v0.4.16):
+      // Same rule for `completedVia` / `streamingFlagStuck` (v0.4.17):
       // how the adapter decided the answer was done ('stable', or
       // 'stable-while-streaming' when the stop button stuck). The
       // runner logs it; the done file does not gain a field.
