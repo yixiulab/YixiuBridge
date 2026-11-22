@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.15';
+  var VERSION = '0.4.16';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -198,9 +198,58 @@ importScripts(
   // Keep-alive: wakes the worker at least once a minute so the SSE loop
   // resumes promptly after Chrome suspends it. The same tick also checks
   // for a newer version on disk (auto-update, see checkForUpdate).
+  //
+  // v0.4.16 (teacher-005, 2026-11-22): two reconnect fixes ride on this
+  // tick. (1) Stale SSE: the bridge sends an SSE heartbeat every 15s,
+  // so no traffic for 45s (3 missed heartbeats) means the stream is
+  // dead even if `bridge.connected` still says true — a worker suspended
+  // mid-stream leaves the flag stale, and the old "reconnect if
+  // !connected" check then never fired (0 extensions for 7 minutes
+  // after a bridge restart, until the user double-clicked .bat). Stop
+  // the old loop and start a fresh one; the generation guard in
+  // bridge-client.js makes sure the old loop cannot come back.
+  // (2) Stale content script: if the Gemini tab runs an old adapter or
+  // its content script does not answer, reload the tab now (see
+  // healGeminiTab) — the next ask would pay the same reload plus a 30s
+  // ping timeout.
+  var lastGeminiHealAt = 0;
+  var GEMINI_HEAL_MIN_INTERVAL_MS = 5 * 60 * 1000;
+  var SSE_STALE_MS = 45000;
+
+  async function healGeminiTab() {
+    // Proactive content-script heal. Never while a task is running (a
+    // reload would destroy the answer being streamed), and at most once
+    // per 5 minutes — the tab is the user's page, not ours to churn.
+    // No tab at all = nothing to heal (never open one unprompted;
+    // _ensureGeminiTab opens one when a task actually needs it).
+    // Reload, not re-injection: re-injecting the content script would
+    // register a SECOND onMessage listener (Chrome keeps the old one),
+    // so asks would be handled twice; a reload is the clean, known-good
+    // path (the same one _ensureGeminiTab uses).
+    try {
+      if (!router) return;
+      var tasks = router.tasks ? Array.from(router.tasks.values()) : [];
+      if (tasks.some(function (t) { return t && t.status === 'running'; })) return;
+      if (Date.now() - lastGeminiHealAt < GEMINI_HEAL_MIN_INTERVAL_MS) return;
+      var tab = await router._findGeminiTab();
+      if (!tab) return;
+      var cs = await router._pingContentScript(tab.id, 10000);
+      if (cs === 'ok') return;
+      lastGeminiHealAt = Date.now();
+      await chrome.tabs.reload(tab.id);
+    } catch (e) { /* best effort — the next ask heals it the old way */ }
+  }
+
   chrome.alarms.onAlarm.addListener(function (alarm) {
     if (alarm.name === 'yixiubridge-keepalive') {
-      if (bridge && !bridge.connected) bridge.connect();
+      if (bridge) {
+        var st = bridge.status();
+        if (!st.connected || (st.lastSeen && Date.now() - st.lastSeen > SSE_STALE_MS)) {
+          bridge.stop();
+          bridge.connect();
+        }
+      }
+      healGeminiTab();
       checkForUpdate();
     }
   });
