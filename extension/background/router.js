@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.12';
+    this.version = opts.version || '0.4.13';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -53,7 +53,10 @@
       // (thinkingWarning); dropping them here made the runner's done
       // file report applied_thinking: null with no warning even though
       // the adapter had computed both (verify13, 2026-11-22).
-      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs, adapterVersion: result.adapter_version || null, thinkingWarning: result.thinkingWarning || null, appliedThinking: result.appliedThinking || null });
+      // Same rule for `recovered` (v0.4.13): an answer the adapter
+      // rescued from the tab after the send checks misjudged must be
+      // marked as recovered all the way to the runner's done file.
+      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs, adapterVersion: result.adapter_version || null, thinkingWarning: result.thinkingWarning || null, appliedThinking: result.appliedThinking || null, recovered: !!result.recovered });
     } else {
       this._setTask(taskId, { status: 'failed', error: (result && result.error) || 'unknown gemini error', adapterVersion: (result && result.adapter_version) || null });
     }
@@ -94,6 +97,7 @@
         case 'read_page': return { ok: true, result: await this._readPage() };
         case 'list_models': return { ok: true, result: await this._listModels() };
         case 'ask_gemini': return { ok: true, result: await this._askGemini(params) };
+        case 'recover_last_answer': return { ok: true, result: await this._recoverLastAnswer(params) };
         case 'get_answer': return { ok: true, result: this._getAnswer(params) };
         default: return { ok: false, error: 'unknown tool: ' + tool };
       }
@@ -287,7 +291,7 @@
 
     var finished = await this._waitForTask(taskId, timeoutMs);
     if (finished.status === 'done') {
-      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId, adapter_version: finished.adapterVersion || null, thinkingWarning: finished.thinkingWarning || null, appliedThinking: finished.appliedThinking || null };
+      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId, adapter_version: finished.adapterVersion || null, thinkingWarning: finished.thinkingWarning || null, appliedThinking: finished.appliedThinking || null, recovered: !!finished.recovered };
     }
     if (finished.status === 'failed') {
       // The version tag travels in the error string so it survives the
@@ -299,6 +303,30 @@
     // Still running after timeout: return pending; the task keeps running and
     // the bridge is notified via task_update when it finishes.
     return { status: 'pending', task_id: taskId, adapter_version: null, note: 'answer still streaming — poll get_answer with this task_id' };
+  };
+
+  // Read the latest COMPLETE answer already in the Gemini tab, without
+  // asking again (v0.4.13). The recovery path for the 2026-11-22
+  // teacher-testpc saga: the runner's fetch aborted (or the send check
+  // misjudged) while Gemini had already answered. Deliberately NOT
+  // _ensureGeminiTab: reloading the tab would destroy the very answer
+  // being recovered. No tab, or a content script that does not answer,
+  // is a plain error — the caller then writes the failed file as before.
+  Router.prototype._recoverLastAnswer = async function (params) {
+    var tab = await this._findGeminiTab();
+    if (!tab) throw new Error('recover_last_answer: no Gemini tab is open');
+    var res;
+    try {
+      res = await chrome.tabs.sendMessage(tab.id, { from: 'yixiubridge-sw', tool: 'recover_last_answer', params: { prompt: params.prompt || '' } });
+    } catch (e) {
+      throw new Error('recover_last_answer: could not reach the Gemini content script: ' + e.message);
+    }
+    if (!res || !res.ok) {
+      var av = res && res.adapter_version;
+      throw new Error('recover_last_answer: ' + ((res && res.error) || 'no answer found in the current Gemini tab')
+        + (av ? ' [adapter_version: ' + av + ']' : ''));
+    }
+    return res.result;
   };
 
   Router.prototype._getAnswer = function (params) {
