@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-bridge-0412-verify25",
+  "error": "ask_gemini task task_mwrq29kt2v36yu did not finish within 900s — poll get_answer with task_id task_mwrq29kt2v36yu for the result",
+  "adapter_version": null,
+  "bridge_version": "0.4.12",
+  "bridge_task_id": "task_mwrq29kt2v36yu",
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T11:11:47.891Z"
+}
