@@ -111,7 +111,7 @@ test('"no response appeared" error carries the conversation-structure dump', asy
   assert.match(res.error, /Conversation structure:/, 'the error must carry the structural dump');
   assert.match(res.error, /model-response=0/, 'dump counts the model turns found');
   assert.match(res.error, /scope:/, 'dump names the scope used');
-  assert.match(res.error, /adapter_version: 0\.4.7/);
+  assert.match(res.error, /adapter_version: 0\.4.8/);
   assert.doesNotMatch(res.error, /需要我为你做些什么/, 'the dump is structural, never page text');
 });
 
