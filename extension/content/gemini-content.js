@@ -17,7 +17,7 @@
   // tab opened earlier still runs the OLD content script (Chrome does not
   // re-inject on extension reload), so the router reloads the tab once
   // when this version is stale or missing.
-  var CONTENT_VERSION = '0.4.10';
+  var CONTENT_VERSION = '0.4.11';
 
   function getAdapter() {
     if (adapter) return adapter;
@@ -25,8 +25,34 @@
       ? window.YixiuBridgeGeminiAdapter
       : (typeof YixiuBridgeGeminiAdapter !== 'undefined' ? YixiuBridgeGeminiAdapter : null);
     if (!factory || !factory.createAdapter) return null;
-    adapter = factory.createAdapter(document, { win: window });
+    adapter = factory.createAdapter(document, { win: window, requestTrustedClick: requestTrustedClick });
     return adapter;
+  }
+
+  // Ask the background service worker for a real (CDP) trusted click
+  // on a thinking-level item (v0.4.11). Resolves {ok} / {ok:false,
+  // error}. Times out after 15s so a missing or dead background never
+  // hangs an ask — the adapter then falls back to synthetic methods.
+  function requestTrustedClick(levelText) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve({ ok: false, error: 'trusted-click timed out after 15s' }); }
+      }, 15000);
+      try {
+        chrome.runtime.sendMessage({ type: 'yixiubridge-trusted-click', levelText: levelText }, function (res) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(res && typeof res === 'object' ? res : { ok: false, error: 'no response from background' });
+        });
+      } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve({ ok: false, error: 'trusted-click send failed: ' + (e && e.message ? e.message : String(e)) });
+      }
+    });
   }
 
   function getAdapterVersion() {
@@ -66,6 +92,25 @@
 
     if (msg.tool === 'read_page') {
       sendResponse({ ok: true, snapshot: pageSnapshot() });
+      return false;
+    }
+
+    // Background (trusted-click flow, v0.4.11): measure a thinking-level
+    // item's viewport centre AFTER the debugger is attached, so the
+    // coordinates already account for the debug infobar's viewport
+    // shift. The submenu must already be open — the adapter only reads.
+    if (msg.type === 'measure-thinking-item') {
+      var adMeasure = getAdapter();
+      if (!adMeasure || typeof adMeasure.measureThinkingLevelItem !== 'function') {
+        sendResponse({ ok: false, error: 'gemini adapter not loaded or measureThinkingLevelItem missing' });
+        return false;
+      }
+      try {
+        var measured = adMeasure.measureThinkingLevelItem(msg.levelText || '');
+        sendResponse(measured && typeof measured === 'object' ? measured : { ok: false, error: 'measure returned nothing' });
+      } catch (e) {
+        sendResponse({ ok: false, error: 'measure failed: ' + (e && e.message ? e.message : String(e)) });
+      }
       return false;
     }
 
