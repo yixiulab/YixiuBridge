@@ -17,7 +17,7 @@
   // tab opened earlier still runs the OLD content script (Chrome does not
   // re-inject on extension reload), so the router reloads the tab once
   // when this version is stale or missing.
-  var CONTENT_VERSION = '0.4.12';
+  var CONTENT_VERSION = '0.4.13';
 
   function getAdapter() {
     if (adapter) return adapter;
@@ -25,7 +25,7 @@
       ? window.YixiuBridgeGeminiAdapter
       : (typeof YixiuBridgeGeminiAdapter !== 'undefined' ? YixiuBridgeGeminiAdapter : null);
     if (!factory || !factory.createAdapter) return null;
-    adapter = factory.createAdapter(document, { win: window, requestTrustedClick: requestTrustedClick });
+    adapter = factory.createAdapter(document, { win: window, requestTrustedClick: requestTrustedClick, requestTrustedSendClick: requestTrustedSendClick });
     return adapter;
   }
 
@@ -51,6 +51,33 @@
         done = true;
         clearTimeout(timer);
         resolve({ ok: false, error: 'trusted-click send failed: ' + (e && e.message ? e.message : String(e)) });
+      }
+    });
+  }
+
+  // Ask the background service worker for a real (CDP) trusted click
+  // on the SEND button (v0.4.13, teacher-001): the adapter's plain
+  // click + Enter both missed on the real page. Same 15s timeout as
+  // the thinking-level trusted click, so a dead background never hangs
+  // an ask — the adapter falls back to the pointer sequence.
+  function requestTrustedSendClick() {
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () {
+        if (!done) { done = true; resolve({ ok: false, error: 'trusted-send-click timed out after 15s' }); }
+      }, 15000);
+      try {
+        chrome.runtime.sendMessage({ type: 'yixiubridge-trusted-click', target: 'send' }, function (res) {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve(res && typeof res === 'object' ? res : { ok: false, error: 'no response from background' });
+        });
+      } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve({ ok: false, error: 'trusted-send-click send failed: ' + (e && e.message ? e.message : String(e)) });
       }
     });
   }
@@ -110,6 +137,48 @@
         sendResponse(measured && typeof measured === 'object' ? measured : { ok: false, error: 'measure returned nothing' });
       } catch (e) {
         sendResponse({ ok: false, error: 'measure failed: ' + (e && e.message ? e.message : String(e)) });
+      }
+      return false;
+    }
+
+    // Background (trusted-send-click flow, v0.4.13): measure the send
+    // button's viewport centre AFTER the debugger is attached, so the
+    // coordinates already account for the debug infobar's viewport
+    // shift. Mirrors 'measure-thinking-item'.
+    if (msg.type === 'measure-send-button') {
+      var adSend = getAdapter();
+      if (!adSend || typeof adSend.measureSendButton !== 'function') {
+        sendResponse({ ok: false, error: 'gemini adapter not loaded or measureSendButton missing' });
+        return false;
+      }
+      try {
+        var measuredSend = adSend.measureSendButton();
+        sendResponse(measuredSend && typeof measuredSend === 'object' ? measuredSend : { ok: false, error: 'measure returned nothing' });
+      } catch (e) {
+        sendResponse({ ok: false, error: 'measure failed: ' + (e && e.message ? e.message : String(e)) });
+      }
+      return false;
+    }
+
+    // Recovery read (v0.4.13): return the latest COMPLETE answer already
+    // in the tab, without asking again. The adapter refuses when the
+    // prompt never left the box, so a previous turn's answer is never
+    // returned as this turn's. Synchronous read — answer on the channel.
+    if (msg.tool === 'recover_last_answer') {
+      var adRec = getAdapter();
+      if (!adRec || typeof adRec.recoverLastAnswer !== 'function') {
+        sendResponse({ ok: false, error: 'gemini adapter not loaded or recoverLastAnswer missing', adapter_version: getAdapterVersion() });
+        return false;
+      }
+      try {
+        var rec = adRec.recoverLastAnswer((msg.params && msg.params.prompt) || '');
+        if (rec && rec.ok) {
+          sendResponse({ ok: true, result: { answer: rec.answer, model: 'gemini-web', adapter_version: getAdapterVersion(), recovered: true } });
+        } else {
+          sendResponse({ ok: false, error: (rec && rec.error) || 'recover_last_answer: no answer found in the current Gemini tab', adapter_version: getAdapterVersion() });
+        }
+      } catch (e) {
+        sendResponse({ ok: false, error: 'recover failed: ' + (e && e.message ? e.message : String(e)), adapter_version: getAdapterVersion() });
       }
       return false;
     }
