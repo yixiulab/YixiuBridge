@@ -137,6 +137,17 @@ test('ask with a thinking level whose selectable radio lives inside the menu ite
   assert.equal(page.picker.textContent, 'Neon 高');
 });
 
+test('ask with a thinking level whose mouse clicks are ignored applies it by keyboard (v0.4.9)', async () => {
+  const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, levelClickDead: true, initialLevel: '中' });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 15000 });
+  const res = await adapter.ask('hello', { thinking: '高' });
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, 'ok');
+  assert.equal(res.appliedThinking, '高');
+  assert.equal(res.thinkingWarning, undefined);
+  assert.equal(page.picker.textContent, 'Neon 高');
+});
+
 test('ask with a thinking level that does not stick warns and still answers (v0.4.2)', async () => {
   const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, levelSticks: false, initialLevel: '中' });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 15000 });
