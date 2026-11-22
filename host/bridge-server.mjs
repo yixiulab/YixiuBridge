@@ -109,6 +109,43 @@ export async function createBridgeServer({ port = C.BRIDGE_PORT, dataDir = DEFAU
       return { ok: true, result: { ok: true, bridge: 'connected', version: C.EXTENSION_VERSION, extensions: extensions.size } };
     }
 
+    // recover_last_answer never takes the lock either (v0.4.13): it is
+    // the recovery path for a call whose fetch was aborted or whose
+    // send check misjudged — the answer may already be in the tab while
+    // a task is still marked running, and the caller must be able to
+    // read it without waiting for the lock. 60s ceiling; the extension
+    // reads the live page and refuses when the prompt never left the
+    // input box.
+    if (tool === 'recover_last_answer') {
+      if (extensions.size === 0) {
+        return { ok: false, error: 'no Chrome extension connected — load YixiuBridge in Chrome (chrome://extensions -> Load unpacked) and make sure the bridge is running.' };
+      }
+      const wantRec = params.browser || params.profile || null;
+      const extRec = matchExtension(extensions, wantRec);
+      if (!extRec) {
+        return { ok: false, error: 'no Chrome profile matches "' + wantRec + '" — connected profiles: ' + Array.from(extensions.values()).map((e) => e.profile.label).join(', ') };
+      }
+      if (extRec.ambiguous) {
+        return { ok: false, error: 'ambiguous browser "' + wantRec + '" — matches: ' + extRec.ambiguous.join(', ') };
+      }
+      const recId = 'call_' + (nextId++) + '_' + Date.now().toString(36);
+      return new Promise((resolve) => {
+        const recTimer = setTimeout(() => {
+          pending.delete(recId);
+          resolve({ ok: false, error: 'recover_last_answer timed out after 60s — the Gemini tab did not answer' });
+        }, 60000);
+        pending.set(recId, {
+          tool,
+          taskId: null,
+          resolve: (frame) => {
+            clearTimeout(recTimer);
+            resolve(frame);
+          },
+        });
+        pushToExtension(extRec, { type: 'tool_call', id: recId, tool, params, controller: clientId });
+      });
+    }
+
     if (controller.busy && controller.clientId !== clientId) {
       return { ok: false, error: 'browser busy — a task is already running for ' + controller.clientId + '. Wait for it to finish, then retry.' };
     }
