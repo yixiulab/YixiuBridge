@@ -33,7 +33,7 @@ const MOCK_LEVELS = ['低', '中', '高'];
 // (v0.4.12) is invisible in tests.
 const MOCK_LEVEL_DESCS = { '低': '快速、高效', '中': '深度适中', '高': '超级详尽' };
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1, sendNeedsPointerSequence = false, sendStartsOnTrustedClick = false, sendStartsLateMs = 0 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -302,10 +302,18 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   function startStreaming() {
     if (stopBtn) return; // already streaming
     if (realStructure) {
-      const fresh = buildTurn(box.textContent || '', '');
+      const fresh = buildTurn(box.textContent || box.value || '', '');
       convo.appendChild(fresh.turn);
       responseEl = fresh.markdown;
     } else {
+      // Mirror the real page: the sent prompt becomes a user-query turn
+      // before the model response, so recoverLastAnswer can prove the
+      // prompt left the box by matching the latest user query (v0.4.13).
+      const uq = new FakeElement('user-query');
+      const line = new FakeElement('p', { class: 'query-text-line' });
+      line.textContent = box.textContent || box.value || '';
+      uq.appendChild(line);
+      convo.appendChild(uq);
       responseEl = new FakeElement('div', { class: 'model-response-text' });
       convo.appendChild(responseEl);
     }
@@ -325,7 +333,30 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     setTimeout(step, chunkMs);
   }
 
-  send.addEventListener('click', () => { startStreaming(); });
+  // Send failure modes (v0.4.13, teacher-001):
+  // - sendNeedsPointerSequence: a bare 'click' (el.click()) is ignored;
+  //   only a full pointer sequence (pointerdown ... click) starts the
+  //   answer — the real page's behaviour that made click+Enter miss.
+  // - sendStartsOnTrustedClick: only a CDP trusted click
+  //   (send.__trustedClick) starts streaming.
+  // - sendStartsLateMs: the click schedules streaming after a delay, so
+  //   the send checks misjudge and recovery must find the late answer.
+  let pointerDownSeen = false;
+  send.addEventListener('pointerdown', () => { pointerDownSeen = true; });
+  send.addEventListener('click', () => {
+    if (sendStartsOnTrustedClick) return;
+    if (sendNeedsPointerSequence && !pointerDownSeen) return;
+    pointerDownSeen = false;
+    if (sendStartsLateMs) {
+      if (stopBtn) return;
+      setTimeout(() => { startStreaming(); }, sendStartsLateMs);
+      return;
+    }
+    startStreaming();
+  });
+  if (sendStartsOnTrustedClick) {
+    send.__trustedClick = () => { startStreaming(); };
+  }
 
   if (sendOnEnter) {
     box.addEventListener('keydown', (ev) => {
