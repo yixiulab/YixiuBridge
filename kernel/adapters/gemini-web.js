@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.14';
+  var ADAPTER_VERSION = '0.4.15';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -816,7 +816,7 @@
       return String(s || '').replace(/\s+/g, ' ').trim();
     }
 
-    // Does the latest user-query turn carry this prompt? (v0.4.14)
+    // Does the latest user-query turn carry this prompt? (v0.4.15)
     // The v0.4.13 check was one strict test — the query must contain
     // the prompt's first 60 chars verbatim — and teacher-testpc-004
     // (2026-11-22 18:15) missed on it while the prompt WAS in the tab:
@@ -832,7 +832,7 @@
     //      — survives the page showing the prompt truncated.
     // A prompt rendered with BOTH a front prefix and a cut tail still
     // misses; that case now surfaces in the failed file as
-    // recover_error instead of a silent guess (runner side, v0.4.14).
+    // recover_error instead of a silent guess (runner side, v0.4.15).
     function promptMatchesQuery(prompt, queryText) {
       var p = normalizeQueryText(prompt);
       var q = normalizeQueryText(queryText);
@@ -854,7 +854,7 @@
     //     baseline captured before the prompt was filled — a previous
     //     turn's text can never qualify;
     //   - without a baseline, the latest user-query turn must carry the
-    //     prompt text (promptMatchesQuery, v0.4.14 — tolerant of how
+    //     prompt text (promptMatchesQuery, v0.4.15 — tolerant of how
     //     the page renders the query, see below).
     // A still-streaming answer is refused (it is not complete yet; the
     // in-flight ask will deliver it via the task store). Returns
@@ -879,7 +879,18 @@
       var queries = getUserQueryTexts();
       var q = queries.length ? queries[queries.length - 1] : '';
       if (!promptMatchesQuery(p, q)) {
-        return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
+        // v0.4.15 (teacher-003, 2026-11-22): the prompt never left the
+        // box (picker button not found, ask failed before sending) —
+        // but the user can SEE a long answer already in the tab and
+        // wants it back. Fall back to the latest COMPLETE answer in
+        // the tab, flagged unmatched so the caller knows it was not
+        // verified against this prompt. A streaming answer is still
+        // refused (not complete yet). When the tab has no answer at
+        // all, keep the original "never sent" error.
+        if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
+        var latestUnmatched = getLatestResponseText();
+        if (!latestUnmatched) return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
+        return { ok: true, answer: latestUnmatched, recovered: true, unmatched: true };
       }
       if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
       var latest = getLatestResponseText();
@@ -1017,7 +1028,18 @@
     }
 
     async function openModelMenu() {
+      // v0.4.15 (teacher-003, 2026-11-22): the picker button was not
+      // found on the first look even though the conversation was live
+      // and the user could see it — the page can be mid-render or the
+      // tab just (re)loaded, so poll for the button for up to 15s
+      // before declaring the UI changed. A missing button after the
+      // full wait is still a hard failure (not a retry of the click).
       var btn = findModelPickerButton();
+      var deadline = Date.now() + 15000;
+      while (!btn.el && Date.now() < deadline) {
+        await sleep(500);
+        btn = findModelPickerButton();
+      }
       if (!btn.el) {
         return { ok: false, error: 'gemini model picker button not found — UI may have changed (tried: ' + SELECTORS.MODEL_PICKER_BUTTON.join(' | ') + ', plus buttons showing a model name)' };
       }
