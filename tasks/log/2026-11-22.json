@@ -302,5 +302,20 @@
     "elapsed_ms": null,
     "error": "ask_gemini failed: ask_gemini: gemini send button not found — Enter fallback also did not send the prompt (tried: icon [data-mat-icon-name*=\"arrow_up\"] -> closest button | button[aria-label=\"Send message\"] | button[aria-label*=\"Send\"] | button[data-test-id=\"send-button\"] | button[aria-label*=\"send\"] | button[aria-label=\"发送消息\"] | button[aria-label*=\"发送\"] | button.send-button | button[title*=\"发送\"] | button[title*=\"Send\"] | button[title*=\"提交\"] | button[title*=\"Submit\"] | button[aria-label*=\"提交\"] | button[aria-label*=\"Submit\"] | button[data-test-id*=\"send\"] | button[data-test-id*=\"Send\"] | button[class*=\"send\"] | button[class*=\"Send\"] | role=button + send-like text | button svg arrow icon) Buttons near the prompt box (32 total, nearest first): button aria-label=\"打开模式选择器，当前模式为“Neon”\" class=\"mdc-button mat-mdc-button-base mat-mdc-tooltip-trigger input-area-switch mat-mdc\" data-test-id=\"bard-mode-menu-button\" icon=\"keyboard_arrow_down\" text=\"Neon\" | button aria-label=\"停止回答\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"stop\" | button aria-label=\"上传和工具\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"plus\" text=\"New\" | button aria-label=\"语音输入 (^⇧D)\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"mic\" | button aria-label=\"复制提示\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"copy\" | button aria-label=\"修改\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-mdc-button\" icon=\"edit\" [disabled] | button aria-label=\"打开边栏\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-mdc-tooltip-trigger \" data-test-id=\"side-nav-sparkle-button\" icon=\"side_nav_expand\" | button aria-label=\"搜索对话内容\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"search\" | button aria-label=\"关闭边栏\" class=\"mdc-icon-button mat-mdc-icon-button mat-mdc-button-base mat-badge mat-unthemed m\" icon=\"side_nav\" | button aria-label=\"展开/收起“笔记本”\" class=\"expandable-section-header\" icon=\"keyboard_arrow_down\" text=\"笔记本\" Send-arrow icon ancestors: No arrow_upward icon found in the page. [adapter_version: 0.4.11]",
     "at": "2026-11-22T10:07:54.730Z"
+  },
+  {
+    "id": "task-20261122-bridge-0411-verify23",
+    "status": "done",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": "低",
+    "answered_model": "Neon",
+    "adapter_version": "0.4.11",
+    "bridge_version": "0.4.11",
+    "bridge_task_id": "task_mwrogmph031mf4",
+    "elapsed_ms": 22220,
+    "error": null,
+    "at": "2026-11-22T10:12:22.633Z"
   }
 ]
