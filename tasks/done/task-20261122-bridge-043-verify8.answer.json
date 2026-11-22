@@ -1,0 +1,14 @@
+{
+  "id": "task-20261122-bridge-043-verify8",
+  "answer": "OK",
+  "model": "gemini-web",
+  "elapsed_ms": 12825,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "answered_model": "Neon",
+  "thinking_warning": null,
+  "adapter_version": "0.4.3",
+  "bridge_version": "0.4.3",
+  "bridge_task_id": "task_mwrjtwsm5bzo0f",
+  "answered_at": "2026-11-22T08:02:32.677Z"
+}
