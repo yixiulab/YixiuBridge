@@ -33,7 +33,7 @@ const MOCK_LEVELS = ['低', '中', '高'];
 // (v0.4.12) is invisible in tests.
 const MOCK_LEVEL_DESCS = { '低': '快速、高效', '中': '深度适中', '高': '超级详尽' };
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1, sendNeedsPointerSequence = false, sendStartsOnTrustedClick = false, sendStartsLateMs = 0 } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1, sendNeedsPointerSequence = false, sendStartsOnTrustedClick = false, sendStartsLateMs = 0, stopBtnStuck = false } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -325,7 +325,12 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
         responseEl.textContent += chunks[i];
         i++;
         setTimeout(step, chunkMs);
-      } else if (stopBtn) {
+      } else if (stopBtn && !stopBtnStuck) {
+        // stopBtnStuck (v0.4.16, teacher-005): the text finishes but the
+        // stop button / thinking indicator stays up forever — the
+        // streaming flag is stuck, and only the text-stability rule may
+        // complete the answer. Without it the stop button is removed
+        // when the last chunk lands (the normal page behaviour).
         stopBtn.remove();
         stopBtn = null;
       }
