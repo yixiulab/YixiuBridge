@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.8';
+  var ADAPTER_VERSION = '0.4.9';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1065,7 +1065,7 @@
     // event sequence (pointerdown, mousedown, pointerup, mouseup, click).
     // A bare el.click() only dispatches 'click'; the thinking-level
     // submenu items ignore it — verify15 proved 3 plain clicks leave
-    // the checkmark on 低 (v0.4.8 retry did not help). Falls back to
+    // the checkmark on 低 (v0.4.9 retry did not help). Falls back to
     // el.click() when the window has no MouseEvent (tests).
     function clickElement(el) {
       if (!el) return false;
@@ -1109,10 +1109,41 @@
       return best || item;
     }
 
+    // Activate a level item by keyboard instead of a mouse click: focus
+    // the target, then dispatch Enter (menu item) or Space (radio). The
+    // real page ignores synthetic mouse clicks on the level items
+    // (verify15/16: 3 container clicks and 3 full pointer sequences left
+    // the checkmark on 低) — but the submenu DOES open on screen, so the
+    // UI is alive; keyboard activation is a different input path that
+    // Angular Material menus honour. Returns false when the window has
+    // no KeyboardEvent.
+    function activateLevelByKeyboard(target) {
+      if (!target) return false;
+      try {
+        if (typeof target.focus === 'function') target.focus();
+      } catch (e) { /* focus is best-effort */ }
+      var isRadio = false;
+      try {
+        var tag = (target.tagName || '').toLowerCase();
+        var role = (typeof target.getAttribute === 'function' && target.getAttribute('role')) || '';
+        isRadio = tag === 'input' || role === 'radio' || tag === 'mat-radio-button';
+      } catch (e) { isRadio = false; }
+      var key = isRadio ? ' ' : 'Enter';
+      var code = isRadio ? 'Space' : 'Enter';
+      try {
+        if (typeof win.KeyboardEvent === 'function') {
+          target.dispatchEvent(new win.KeyboardEvent('keydown', { key: key, code: code, bubbles: true, cancelable: true }));
+          target.dispatchEvent(new win.KeyboardEvent('keyup', { key: key, code: code, bubbles: true, cancelable: true }));
+          return true;
+        }
+      } catch (e) { /* fall through */ }
+      return false;
+    }
+
     // Open the model menu, open the 思考等级 submenu, click the given
     // level item. Returns { ok: true } or an error object (invalid-level
     // when the level is not in the menu, apply-failed otherwise).
-    async function clickThinkingLevelItem(want) {
+    async function clickThinkingLevelItem(want, attempt) {
       var opened = await openModelMenu();
       if (!opened.ok) return opened;
       var trigger = null;
@@ -1144,9 +1175,20 @@
         await closeModelMenu();
         return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
-      if (!clickElement(findLevelClickTarget(match, want))) {
+      var target = findLevelClickTarget(match, want);
+      // Activation alternates by attempt: 1st and 3rd try the keyboard
+      // (a different input path — synthetic mouse clicks are ignored by
+      // the real page), 2nd keeps the mouse click as a fallback.
+      var activated;
+      if ((attempt || 0) % 2 === 0) {
+        activated = activateLevelByKeyboard(target);
+        if (!activated) activated = clickElement(target);
+      } else {
+        activated = clickElement(target);
+      }
+      if (!activated) {
         await closeModelMenu();
-        return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed' };
+        return { ok: false, code: 'apply-failed', error: 'gemini thinking level activation failed' };
       }
       return { ok: true };
     }
@@ -1162,7 +1204,7 @@
     // Verification (v0.4.4) reads the submenu's checked item via
     // readSelectedThinkingLevel — never the picker button text, which
     // misreported 高 in verify11 while the submenu showed 低.
-    // Retry (v0.4.8): the real page sometimes swallows the first click
+    // Retry (v0.4.9): the real page sometimes swallows the first click
     // on a submenu item (same quirk as the model menu's first click,
     // v0.4.2) — verify14 proved a single click leaves the checkmark on
     // 低. So click, verify, and retry up to 3 times before giving up.
@@ -1172,7 +1214,7 @@
       var lastApplied = null;
       var lastError = null;
       for (var attempt = 0; attempt < 3; attempt++) {
-        var clicked = await clickThinkingLevelItem(want);
+        var clicked = await clickThinkingLevelItem(want, attempt);
         if (!clicked.ok) return clicked;
         await sleep(300);
         var check = await readSelectedThinkingLevel();
@@ -1281,7 +1323,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.8: read from the
+        // carries the ACTUALLY applied level (v0.4.9: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
