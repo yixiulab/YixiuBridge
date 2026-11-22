@@ -1,0 +1,13 @@
+{
+  "id": "task-20261122-bridge-teacher-005",
+  "stage": "claimed",
+  "detail": "bridge v0.4.15, 2 extensions connected",
+  "updated_at": "2026-11-22T20:05:45.360Z",
+  "stages": [
+    {
+      "stage": "claimed",
+      "at": "2026-11-22T20:05:45.360Z",
+      "detail": "bridge v0.4.15, 2 extensions connected"
+    }
+  ]
+}
