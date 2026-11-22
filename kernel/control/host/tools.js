@@ -86,6 +86,18 @@
         required: ['task_id'],
       },
     },
+    {
+      name: 'recover_last_answer',
+      description: 'Read the latest COMPLETE answer already in the Gemini tab, without asking again. Recovery path for a call whose fetch was aborted or whose send check misjudged while Gemini had already answered (2026-11-22 teacher-testpc saga). Returns {answer, model, recovered: true} or an error when the prompt never left the input box or no answer is in the tab. Never takes the task lock.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'The prompt that was asked, so the tab can prove it was actually sent (the latest user-query turn must carry it)' },
+          browser: { type: 'string', description: 'Chrome profile id/label (optional)' },
+        },
+        required: [],
+      },
+    },
   ];
 
   function getTool(name) {
