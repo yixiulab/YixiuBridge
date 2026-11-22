@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-bridge-0411-verify21",
+  "error": "gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: 0.4.11] Conversation structure: elements found: model-response=0, user-query=1, div.conversation-container=0, .markdown=0, .model-response-text=0, message-content=0 | scope: infinite-scroller.chat-history.enable-lm-fast-follows.enable-lm-fast-follows-phase-2[data-test-id=\"chat-history-container\"] | turn[0]: pending-request.conversation-container.first-prompt.ng-star-inserted > [user-query, thinking-dots-animation, pending-response] text=\"你说 请只回复：OK 请只回复：OK\" [adapter_version: 0.4.11]",
+  "adapter_version": "0.4.11",
+  "bridge_version": "0.4.11",
+  "bridge_task_id": "task_mwro66qux1bv9q",
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T10:06:33.557Z"
+}
