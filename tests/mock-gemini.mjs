@@ -33,7 +33,7 @@ const MOCK_LEVELS = ['低', '中', '高'];
 // (v0.4.12) is invisible in tests.
 const MOCK_LEVEL_DESCS = { '低': '快速、高效', '中': '深度适中', '高': '超级详尽' };
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1, sendNeedsPointerSequence = false, sendStartsOnTrustedClick = false, sendStartsLateMs = 0, stopBtnStuck = false } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1, sendNeedsPointerSequence = false, sendStartsOnTrustedClick = false, sendStartsLateMs = 0, stopBtnStuck = false, menuCloseDelayMs = 0, responseDelayMs = 0 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -71,9 +71,25 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   picker.textContent = pickerText();
   app.appendChild(picker);
 
+  // menuCloseDelayMs (v0.4.17): the real page closes the menu with an
+  // animation — a level click does not remove the overlay at once, and
+  // clicks landing mid-close are swallowed. The adapter must wait for
+  // the close before re-reading aria-checked, or it reads the pre-click
+  // state forever (the submenu items keep the OLD checked value until
+  // the overlay is removed and rebuilt on reopen).
+  let closePending = false;
   function closeMenu() {
-    if (menu) { menu.remove(); menu = null; }
-    if (submenu) { submenu.remove(); submenu = null; }
+    const doClose = () => {
+      if (menu) { menu.remove(); menu = null; }
+      if (submenu) { submenu.remove(); submenu = null; }
+    };
+    if (menuCloseDelayMs > 0) {
+      if (closePending) return;
+      closePending = true;
+      setTimeout(() => { doClose(); closePending = false; }, menuCloseDelayMs);
+    } else {
+      doClose();
+    }
   }
 
   function openSubmenu() {
@@ -193,6 +209,7 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   picker.addEventListener('click', () => {
     pickerClicks++;
     if (pickerClicks < menuOpensOnClick) return;
+    if (closePending) return; // v0.4.17: clicks mid-close are swallowed
     if (menu) closeMenu();
     else doc.body.appendChild(buildMenu());
   });
@@ -295,28 +312,11 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
 
   let stopBtn = null;
   let responseEl = null;
+  let streamingStarted = false;
+  let thinkingDots = null;
 
-  // Shared by the send-button click and (when sendOnEnter is set) an Enter
-  // keydown on the prompt box — the real Gemini page submits on Enter too,
-  // which is what the adapter falls back to when no button is found.
-  function startStreaming() {
-    if (stopBtn) return; // already streaming
-    if (realStructure) {
-      const fresh = buildTurn(box.textContent || box.value || '', '');
-      convo.appendChild(fresh.turn);
-      responseEl = fresh.markdown;
-    } else {
-      // Mirror the real page: the sent prompt becomes a user-query turn
-      // before the model response, so recoverLastAnswer can prove the
-      // prompt left the box by matching the latest user query (v0.4.13).
-      const uq = new FakeElement('user-query');
-      const line = new FakeElement('p', { class: 'query-text-line' });
-      line.textContent = box.textContent || box.value || '';
-      uq.appendChild(line);
-      convo.appendChild(uq);
-      responseEl = new FakeElement('div', { class: 'model-response-text' });
-      convo.appendChild(responseEl);
-    }
+  // The stop button + chunk timer: the visible "streaming" phase.
+  function beginStreaming() {
     stopBtn = new FakeElement('button', { 'aria-label': 'Stop generating' });
     app.appendChild(stopBtn);
     let i = 0;
@@ -333,9 +333,50 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
         // when the last chunk lands (the normal page behaviour).
         stopBtn.remove();
         stopBtn = null;
+        streamingStarted = false;
       }
     };
     setTimeout(step, chunkMs);
+  }
+
+  // Shared by the send-button click and (when sendOnEnter is set) an Enter
+  // keydown on the prompt box — the real Gemini page submits on Enter too,
+  // which is what the adapter falls back to when no button is found.
+  // responseDelayMs (v0.4.17): the query turn lands immediately, but the
+  // response (stop button + text) only starts after the delay — with the
+  // thinking dots showing in between. That is the real page's shape
+  // while Gemini thinks: the prompt IS in the conversation (so the
+  // adapter's send check must see it) and the page IS still working
+  // (so the flexible wait must not cut off at the fixed deadline).
+  function startStreaming() {
+    if (streamingStarted) return; // already streaming (or thinking)
+    streamingStarted = true;
+    if (realStructure) {
+      const fresh = buildTurn(box.textContent || box.value || '', '');
+      convo.appendChild(fresh.turn);
+      responseEl = fresh.markdown;
+    } else {
+      // Mirror the real page: the sent prompt becomes a user-query turn
+      // before the model response, so recoverLastAnswer can prove the
+      // prompt left the box by matching the latest user query (v0.4.13).
+      const uq = new FakeElement('user-query');
+      const line = new FakeElement('p', { class: 'query-text-line' });
+      line.textContent = box.textContent || box.value || '';
+      uq.appendChild(line);
+      convo.appendChild(uq);
+      responseEl = new FakeElement('div', { class: 'model-response-text' });
+      convo.appendChild(responseEl);
+    }
+    if (responseDelayMs > 0) {
+      thinkingDots = new FakeElement('div', { class: 'thinking-dots-animation' });
+      convo.appendChild(thinkingDots);
+      setTimeout(() => {
+        if (thinkingDots) { thinkingDots.remove(); thinkingDots = null; }
+        beginStreaming();
+      }, responseDelayMs);
+      return;
+    }
+    beginStreaming();
   }
 
   // Send failure modes (v0.4.13, teacher-001):
@@ -374,6 +415,13 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     get menu() { return menu; },
     get responseEl() { return responseEl; },
     get stopBtn() { return stopBtn; },
+    // How many times each level was clicked (v0.4.17): the verification
+    // test asserts 高 was clicked exactly once — the retry loop would
+    // mask a stale first read (a later attempt reads fresh after the
+    // close lands), so the count is the only proof the FIRST read was
+    // fresh. On the real page the stale read never heals across
+    // retries (verify14/15/16 all read 低 after 3 attempts).
+    get levelClickCounts() { return { ...levelClickCounts }; },
   };
 }
 
