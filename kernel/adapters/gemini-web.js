@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.11';
+  var ADAPTER_VERSION = '0.4.12';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -343,7 +343,7 @@
     var sendCheckMs = (opts.sendCheckMs !== undefined) ? opts.sendCheckMs : DEFAULTS.sendCheckMs;
     var win = opts.win || (typeof window !== 'undefined' ? window : globalThis);
     // requestTrustedClick(levelText) -> Promise<{ok} | {ok:false, error}>.
-    // Injected by the content script (v0.4.11): asks the background
+    // Injected by the content script (v0.4.12): asks the background
     // service worker for a real CDP trusted click on a thinking-level
     // item. Absent in tests and when the background cannot do CDP — the
     // adapter then falls back to the synthetic chain.
@@ -829,6 +829,27 @@
       return { label: label, codename: codename, description: description, selected: selected, locked: locked, _el: el };
     }
 
+    // The thinking-level names, in the order the real submenu lists them
+    // (low, medium, high). Extract a level item's name EXACTLY — never by
+    // substring. The real items carry a description after the name
+    // ("低 快速、高效" / "中 深度适中" / "高 超级详尽"), and "高" is a
+    // substring of "高效" in 低's description, so indexOf("高") matches
+    // 低 first. That is the root cause of every version since 0.4.4
+    // clicking 低 when asked for 高 on the real page (verify23/24), while
+    // the mock — whose items had no descriptions — never caught it
+    // (v0.4.12). Returns the level name or null.
+    var LEVEL_NAMES = ['低', '中', '高'];
+    function levelLabelOf(el) {
+      if (!el) return null;
+      var text = textOf(el);
+      var tokens = String(text || '').split(/[\s\n]+/).filter(function (t) { return !!t; });
+      for (var i = 0; i < tokens.length; i++) {
+        var tok = tokens[i].replace(/[✓✔]/g, '');
+        if (LEVEL_NAMES.indexOf(tok) !== -1) return tok;
+      }
+      return null;
+    }
+
     function findModelPickerButton() {
       var found = queryFirst(doc, SELECTORS.MODEL_PICKER_BUTTON);
       if (found.el) return found;
@@ -1061,7 +1082,7 @@
         if (MODEL_LABELS.indexOf(m.label) !== -1) continue; // a model item
         var t = textOf(levelItems[j]).trim();
         if (t.indexOf('思考') !== -1) continue; // the trigger itself
-        if (m.selected) { selected = m.label; break; }
+        if (m.selected) { selected = levelLabelOf(levelItems[j]); break; }
       }
       await closeModelMenu();
       return { ok: true, level: selected };
@@ -1108,7 +1129,7 @@
         var kids = el.children || [];
         for (var i = 0; i < kids.length; i++) {
           var kid = kids[i];
-          if (kid.textContent && kid.textContent.indexOf(want) !== -1) { best = kid; walk(kid); }
+          if (levelLabelOf(kid) === want) { best = kid; walk(kid); }
         }
       };
       try { walk(item); } catch (e) { /* fall through */ }
@@ -1194,7 +1215,7 @@
         if (MODEL_LABELS.indexOf(m.label) !== -1) continue;
         var t = textOf(items[i]).trim();
         if (t.indexOf('思考') !== -1) continue;
-        if (t === want || t.indexOf(want) !== -1) {
+        if (levelLabelOf(items[i]) === want) {
           var el = items[i];
           if (!el || typeof el.getBoundingClientRect !== 'function') {
             return { ok: false, error: 'thinking level item has no getBoundingClientRect' };
@@ -1236,9 +1257,11 @@
         if (MODEL_LABELS.indexOf(m.label) !== -1) continue; // a model item
         var t = textOf(levelItems[j]).trim();
         if (t.indexOf('思考') !== -1) continue; // the trigger itself
+        var lvLabel = levelLabelOf(levelItems[j]);
+        if (!lvLabel) continue; // not a level item (no 低/中/高 name)
         foundLevels.push(t);
-        levels.push({ el: levelItems[j], label: t, selected: !!m.selected });
-        if (!match && (t === want || t.indexOf(want) !== -1)) { match = levelItems[j]; wantIdx = levels.length - 1; }
+        levels.push({ el: levelItems[j], label: lvLabel, selected: !!m.selected });
+        if (!match && lvLabel === want) { match = levelItems[j]; wantIdx = levels.length - 1; }
       }
       if (!match) {
         await closeModelMenu();
