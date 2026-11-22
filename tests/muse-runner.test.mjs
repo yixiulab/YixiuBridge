@@ -146,6 +146,7 @@ test('taskFilePaths and logFilePath use the documented layout', () => {
     pending: 'tasks/pending/abc.json',
     done: 'tasks/done/abc.answer.json',
     failed: 'tasks/failed/abc.error.json',
+    status: 'tasks/status/abc.json',
   });
   assert.equal(logFilePath(new Date(2026, 10, 21)), 'tasks/log/2026-11-21.json');
 });
@@ -203,6 +204,52 @@ test('happy path: oldest task answered, done file written, pending deleted, log 
   assert.equal(log[0].status, 'done');
   assert.equal(log[0].adapter_version, '0.3.1');
   assert.equal(log[0].bridge_version, '0.3.1');
+});
+
+test('processOneTask writes a visible progress status file at every stage (v0.4.15)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge();
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  // The status file is the live progress view: current stage + history.
+  const status = readRepo(gh.files, 'tasks/status/t1.json');
+  assert.ok(status, 'status file must exist');
+  assert.equal(status.id, 't1');
+  assert.equal(status.stage, 'done');
+  assert.ok(status.updated_at);
+  const stageNames = status.stages.map((s) => s.stage);
+  assert.deepEqual(stageNames, ['claimed', 'sending', 'done']);
+  assert.ok(status.stages.every((s) => s.at), 'every stage carries a timestamp');
+  // The done file carries the same history, so the record survives.
+  const done = readRepo(gh.files, 'tasks/done/t1.answer.json');
+  assert.deepEqual(done.stages.map((s) => s.stage), ['claimed', 'sending', 'done']);
+  assert.equal(done.recovered_unmatched, false);
+});
+
+test('processOneTask records retrieving + failed stages and unmatched recovery (v0.4.15)', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  // The ask fails before sending; recovery returns the latest tab
+  // answer flagged unmatched (v0.4.15) — the done file must say so.
+  const bridge = makeFakeBridge({ failWith: 'gemini model picker button not found', recover: 'the long teacher answer' });
+  bridge.recoverLastAnswer = async (prompt) => {
+    bridge.calls.push({ op: 'recover', prompt });
+    return { answer: 'the long teacher answer', model: 'Neon', elapsedMs: 500, adapterVersion: '0.4.15', bridgeTaskId: null, recovered: true, unmatched: true };
+  };
+  const res = await processOneTask({ github, bridge, log: () => {}, recoverBudgetMs: 30, recoverPollMs: 10 });
+  assert.equal(res.status, 'done');
+  const done = readRepo(gh.files, 'tasks/done/t1.answer.json');
+  assert.equal(done.answer, 'the long teacher answer');
+  assert.equal(done.recovered, true);
+  assert.equal(done.recovered_unmatched, true);
+  assert.deepEqual(done.stages.map((s) => s.stage), ['claimed', 'sending', 'retrieving', 'done']);
+  const status = readRepo(gh.files, 'tasks/status/t1.json');
+  assert.equal(status.stage, 'done');
 });
 
 test('task with an explicit model passes it through to the bridge', async () => {
