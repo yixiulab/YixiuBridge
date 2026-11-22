@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.13';
+  var ADAPTER_VERSION = '0.4.14';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -810,6 +810,39 @@
       return out;
     }
 
+    // Collapse whitespace so a reflowed or re-wrapped rendering of the
+    // same text still compares equal.
+    function normalizeQueryText(s) {
+      return String(s || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // Does the latest user-query turn carry this prompt? (v0.4.14)
+    // The v0.4.13 check was one strict test — the query must contain
+    // the prompt's first 60 chars verbatim — and teacher-testpc-004
+    // (2026-11-22 18:15) missed on it while the prompt WAS in the tab:
+    // whatever the page did to the rendering (a short prefix in front,
+    // a reflow, a truncated tail), the verbatim head no longer matched
+    // and the recovery refused. Three tries, in order:
+    //   1. strict: the query contains the prompt's first 60 chars;
+    //   2. tail: for a long prompt, the query contains its last 40
+    //      chars — survives a short prefix added at the front, and the
+    //      tail is where two near-identical prompts differ, so a
+    //      different question still cannot match;
+    //   3. reverse: the whole (short) query is contained in the prompt
+    //      — survives the page showing the prompt truncated.
+    // A prompt rendered with BOTH a front prefix and a cut tail still
+    // misses; that case now surfaces in the failed file as
+    // recover_error instead of a silent guess (runner side, v0.4.14).
+    function promptMatchesQuery(prompt, queryText) {
+      var p = normalizeQueryText(prompt);
+      var q = normalizeQueryText(queryText);
+      if (!p || !q) return false;
+      if (q.indexOf(p.slice(0, 60)) !== -1) return true;
+      if (p.length > 80 && q.indexOf(p.slice(-40)) !== -1) return true;
+      if (q.length >= 20 && p.indexOf(q) !== -1) return true;
+      return false;
+    }
+
     // Read the latest COMPLETE answer already in the tab, without asking
     // again (v0.4.13). This is the recovery path for the 2026-11-22
     // teacher-testpc saga: Gemini had answered in the tab, but the
@@ -821,7 +854,8 @@
     //     baseline captured before the prompt was filled — a previous
     //     turn's text can never qualify;
     //   - without a baseline, the latest user-query turn must carry the
-    //     prompt text.
+    //     prompt text (promptMatchesQuery, v0.4.14 — tolerant of how
+    //     the page renders the query, see below).
     // A still-streaming answer is refused (it is not complete yet; the
     // in-flight ask will deliver it via the task store). Returns
     // { ok:true, answer, recovered:true } or { ok:false, error }.
@@ -844,7 +878,7 @@
       }
       var queries = getUserQueryTexts();
       var q = queries.length ? queries[queries.length - 1] : '';
-      if (!p || !q || q.indexOf(p.slice(0, 60)) === -1) {
+      if (!promptMatchesQuery(p, q)) {
         return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
       }
       if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
