@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-teacher-testpc-001",
+  "error": "ask_gemini failed: ask_gemini: gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: icon[data-mat-icon-name=\"arrow_upward\"] -> closest button). The UI may have changed. [adapter_version: 0.4.12]",
+  "adapter_version": "0.4.12",
+  "bridge_version": "0.4.12",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T12:38:38.340Z"
+}
