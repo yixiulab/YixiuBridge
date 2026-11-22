@@ -98,6 +98,30 @@
     }
   };
 
+  // Trusted click via CDP Input.dispatchMouseEvent: a real, trusted
+  // (isTrusted === true) click at viewport CSS pixels. Assumes the tab
+  // is already attached — the caller attaches first (so the debug
+  // infobar's viewport shift has already happened) and detaches after.
+  // Sequence (teacher's answer, 2026-11-22): mouseMoved (hover /
+  // activeItem) -> mousePressed -> mouseReleased. Blink generates the
+  // full mouseup + click from the release. Used for the Gemini
+  // thinking-level submenu items, which ignore every synthetic event
+  // (verify15-19) but accept a real trusted click.
+  DebuggerManager.prototype.trustedClick = async function (tabId, x, y) {
+    var target = { tabId: tabId };
+    var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+    var send = function (type, button, buttons, clickCount) {
+      var params = { type: type, x: x, y: y, button: button, buttons: buttons };
+      if (clickCount) params.clickCount = clickCount;
+      return chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', params);
+    };
+    await send('mouseMoved', 'none', 0);
+    await sleep(40);
+    await send('mousePressed', 'left', 1, 1);
+    await sleep(40);
+    await send('mouseReleased', 'left', 0, 1);
+  };
+
   // Lightweight page snapshot: title, URL, text excerpt. No screenshots.
   DebuggerManager.prototype.snapshot = async function (tabId) {
     var data = await this.evaluate(tabId, '(() => {'
