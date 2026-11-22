@@ -97,6 +97,13 @@
       "channel": "stable",
       "verified_by_muse": false,
       "changelog": "根因：思考等级匹配用子串，\"高\"是\"高效\"（低的描述）的子串，找高时先匹配到低——0.4.4 以来每次都点在已选中的低上，CDP 也一样。修为精确等级名匹配（levelLabelOf：取首个恰好是低/中/高的词），measure/click/读取三处全改；mock 补上真实描述（低 快速、高效/中 深度适中/高 超级详尽）并改角色为 menuitemradio，旧子串逻辑下 5 个测试失败、已证实能捉住此 bug。"
+    },
+    {
+      "version": "0.4.13",
+      "date": "2026-11-22",
+      "channel": "stable",
+      "verified_by_muse": false,
+      "changelog": "修掉“老师明明在标签页里回答了，桥却报失败、答案取不回”的 bug（用户 2026-11-22 14:08 下令先解决）：(1) runner 的 fetch abort 从 min((timeoutS+90)s, 300s) 改成跟 15 分钟总预算对齐——300 秒任务以前 5 分钟就 abort，报错是裸的 This operation was aborted 且无 task_id，答案在标签页里也被丢掉；(2) 新增 recover_last_answer 工具（桥不占锁、路由器不重载标签页、适配器只认本轮新回答或匹配本轮问题的用户提问，上一轮的答案永不冒充本轮）；runner 在 ask 失败后先调一次恢复接口，取到就写 done（带 recovered: true），取不到才写 failed；(3) 发送改成多路重试：先聚焦输入框、再依次试普通点击、回车、CDP 真实点击、完整指针序列，仍不成功才轮询恢复 1 秒再判失败；(4) pollTask 改为先读状态再看 deadline，卡在 deadline 整点答完的任务也不再被丢掉。新增 tests/recover.test.mjs 等测试。"
     }
   ]
 }
