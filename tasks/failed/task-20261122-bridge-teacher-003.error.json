@@ -1,0 +1,11 @@
+{
+  "id": "task-20261122-bridge-teacher-003",
+  "error": "ask_gemini failed: ask_gemini: gemini model picker button not found — UI may have changed (tried: button[data-test-id=\"model-switcher\"] | button[aria-label*=\"模型\"] | button[aria-label*=\"model\"] | button[aria-label*=\"Model\"] | [data-test-id=\"model-picker\"], plus buttons showing a model name) [adapter_version: 0.4.14]",
+  "adapter_version": "0.4.14",
+  "bridge_version": "0.4.14",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "recover_error": "recover_last_answer failed: recover_last_answer: recover: no user query matching the prompt — the prompt was never sent [adapter_version: 0.4.14]",
+  "recover_attempts": 21,
+  "failed_at": "2026-11-22T19:18:11.908Z"
+}
