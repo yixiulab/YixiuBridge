@@ -20,7 +20,7 @@
 // - Completion detection: the Stop button is gone AND the latest response
 //   text is unchanged for ASK_GEMINI_STABLE_MS (default 2s). Either signal
 //   alone is not enough: the stop button can flicker, and text can pause
-//   mid-stream. BUT the stop button can also STICK (v0.4.16, teacher-005,
+//   mid-stream. BUT the stop button can also STICK (v0.4.17, teacher-005,
 //   2026-11-22): the answer text was complete and stable for ~15 minutes
 //   while the stop button / thinking dots stayed up, so the old
 //   "flag must clear" rule burned the whole timeout and the answer was
@@ -239,13 +239,21 @@
     timeoutMs: 180000,
     pollMs: 500,
     stableMs: 2000,
-    // v0.4.16 (teacher-005): text unchanged this long counts as done even
+    // v0.4.17 (teacher-005): text unchanged this long counts as done even
     // while the streaming flag is still up (the flag can stick for
     // minutes after the text finished). 10s is long enough to rule out a
     // genuine mid-stream pause and short enough that a completed answer
     // is returned within ~10s of its text finishing.
     stuckStreamingMs: 10000,
     sendCheckMs: 1000,
+    // v0.4.17 (user order, 2026-11-22): while Gemini is still visibly
+    // generating — text still changing, stop button up, or thinking
+    // dots showing — the fixed timeout must NOT cut the wait off. The
+    // wait extends while activity is fresher than activeGraceMs, up to
+    // hardCapMs from the ask start (inside the runner's 15-minute
+    // overall budget, so the outer safety net still holds).
+    activeGraceMs: 30000,
+    hardCapMs: 840000,
     model: 'gemini-web',
   };
 
@@ -257,7 +265,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.16';
+  var ADAPTER_VERSION = '0.4.17';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -358,6 +366,8 @@
     var stableMs = opts.stableMs || DEFAULTS.stableMs;
     var stuckStreamingMs = opts.stuckStreamingMs || DEFAULTS.stuckStreamingMs;
     var sendCheckMs = (opts.sendCheckMs !== undefined) ? opts.sendCheckMs : DEFAULTS.sendCheckMs;
+    var activeGraceMs = opts.activeGraceMs || DEFAULTS.activeGraceMs;
+    var hardCapMs = opts.hardCapMs || DEFAULTS.hardCapMs;
     var win = opts.win || (typeof window !== 'undefined' ? window : globalThis);
     // requestTrustedClick(levelText) -> Promise<{ok} | {ok:false, error}>.
     // Injected by the content script (v0.4.12): asks the background
@@ -587,6 +597,15 @@
     function isStreaming() {
       var stop = queryFirst(doc, SELECTORS.STOP_BUTTON);
       return !!stop.el;
+    }
+
+    // Thinking indicator: the three-dot animation / pending-response
+    // element shown while Gemini is thinking but no answer text has
+    // streamed yet. Together with isStreaming() this is the "Gemini is
+    // still working" signal the flexible wait (v0.4.17) uses: the fixed
+    // timeout must not cut the wait off while either is up.
+    function isThinking() {
+      return queryAll(doc, ['.thinking-dots-animation', '[class*="thinking-dots"]', '.pending-response', 'pending-response']).length > 0;
     }
 
     // Start-of-text prefixes of the Gemini home screen (hero greeting), in
@@ -860,7 +879,7 @@
       return false;
     }
 
-    // Cross-call text-stability tracker (v0.4.16): recoverLastAnswer is
+    // Cross-call text-stability tracker (v0.4.17): recoverLastAnswer is
     // synchronous — it cannot wait N seconds to prove the text held
     // still. Instead it remembers the latest response element + text it
     // saw; a later call that sees the SAME element with the SAME text
@@ -892,7 +911,7 @@
     }
 
     // The "is the answer complete" gate, shared by all three
-    // recoverLastAnswer branches (v0.4.16). The old rule refused
+    // recoverLastAnswer branches (v0.4.17). The old rule refused
     // whenever the streaming flag was up — teacher-005's flag stayed up
     // ~15 minutes after the text finished, so recovery refused for the
     // whole 5-minute poll while the answer sat in the tab. Now: no text
@@ -927,7 +946,7 @@
     // A still-streaming answer is refused (it is not complete yet; the
     // in-flight ask will deliver it via the task store) — UNLESS its
     // text has been stable for stuckStreamingMs, which means the
-    // streaming flag is stuck, not the answer (v0.4.16, teacher-005).
+    // streaming flag is stuck, not the answer (v0.4.17, teacher-005).
     // Returns { ok:true, answer, recovered:true } or { ok:false, error }.
     // NOTE: a verbatim repeat of the immediately previous prompt is
     // ambiguous — the latest user query matches, so the previous turn's
@@ -968,7 +987,7 @@
         // the tab, flagged unmatched so the caller knows it was not
         // verified against this prompt. A streaming answer is still
         // refused (not complete yet) — unless its text is stable past
-        // the stuck-flag threshold (v0.4.16). When the tab has no answer
+        // the stuck-flag threshold (v0.4.17). When the tab has no answer
         // at all, keep the original "never sent" error.
         var entryU = latestResponseEntry();
         if (!entryU) return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
@@ -1287,6 +1306,25 @@
 
     // Read which thinking level is actually selected right now (ground
     // truth): re-open the model menu, open the 思考等级 submenu, and
+    // Wait until no model-menu item is visible (the menu/submenu
+    // overlay has closed), polling every 200ms up to budgetMs. A click
+    // on a level item only takes effect when Angular closes the menu
+    // and re-renders — re-opening and reading aria-checked while the
+    // old overlay is still up reads the PRE-click state forever
+    // (teacher-004, 2026-11-22; the user watched new conversations
+    // open with 高 selected while the adapter kept reporting 低).
+    // Returns true when the menu is closed, false when the budget runs
+    // out (the caller then reads anyway — a stale read is a warning,
+    // never a failure).
+    async function waitForMenuClosed(budgetMs) {
+      var deadline = Date.now() + (budgetMs || 2000);
+      while (Date.now() < deadline) {
+        if (!readModelMenuItems().length) return true;
+        await sleep(200);
+      }
+      return !readModelMenuItems().length;
+    }
+
     // read the item with the checkmark (parseModelItem.selected:
     // aria-checked / checkmark). The picker button text is NOT ground
     // truth — on the real page it often shows just the model name
@@ -1294,7 +1332,15 @@
     // level that never stuck (2026-11-22: verify11 reported 高 with no
     // warning, but the submenu showed 低). Returns { ok, level } with
     // level null when it cannot be read.
+    // v0.4.17: start from a known-closed menu — opening while the old
+    // overlay is still up toggles it shut (or reuses its stale nodes)
+    // instead of rendering fresh items, so the read must wait for the
+    // close first.
     async function readSelectedThinkingLevel() {
+      if (readModelMenuItems().length) {
+        await closeModelMenu();
+        await waitForMenuClosed(2000);
+      }
       var opened = await openModelMenu();
       if (!opened.ok) return { ok: false, level: null, error: opened.error };
       var trigger = null;
@@ -1561,7 +1607,12 @@
       for (var attempt = 0; attempt < 3; attempt++) {
         var clicked = await clickThinkingLevelItem(want, attempt);
         if (!clicked.ok) return clicked;
-        await sleep(300);
+        // v0.4.17: wait for the menu to actually CLOSE before
+        // verifying — reading aria-checked while the old overlay is
+        // still up returns the pre-click state (低) even though the
+        // click landed (the user watched new conversations open with
+        // 高 selected while the adapter reported 低, 2026-11-22).
+        await waitForMenuClosed(5000);
         var check = await readSelectedThinkingLevel();
         if (check.ok && check.level === want) return { ok: true, thinking: want, applied: want };
         if (check.ok && check.level) lastApplied = check.level;
@@ -1585,7 +1636,7 @@
     // "no response appeared" error instead of returning pre-existing page
     // text as an answer (task -006). When new text appeared but never
     // stabilised, the old timeout error (with the partial answer) is kept.
-    // v0.4.16 (teacher-005): the streaming flag can STICK — the text was
+    // v0.4.17 (teacher-005): the streaming flag can STICK — the text was
     // complete and stable for ~15 minutes while the stop button stayed
     // up, so the old loop (which reset the stability clock on every poll
     // while streaming) burned the whole timeout and the answer was only
@@ -1602,6 +1653,17 @@
       var stableSince = null;
       var polls = 0;
       var everLive = false;
+      // v0.4.17 flexible wait: the fixed deadline must not cut the
+      // wait off while Gemini is visibly still working. lastActivityAt
+      // tracks the last moment the page showed generation in progress
+      // (live text changed, stop button up, or thinking dots showing);
+      // past the deadline the loop keeps going while activity is
+      // fresher than activeGraceMs, up to the hard cap (inside the
+      // runner's 15-minute overall budget, so the outer safety net
+      // still holds). 0 = no activity seen yet: a page that never
+      // shows anything still fails at the deadline, exactly as before.
+      var hardDeadline = startedAt + hardCapMs;
+      var lastActivityAt = 0;
       // Evaluate once up front: the caller may have spent the whole
       // timeout budget on send verification (sendCheckMs), so the deadline
       // can already be past when we get here — without this, the loop
@@ -1611,14 +1673,23 @@
       if (firstLive.length) {
         everLive = true;
         lastLive = firstLive[firstLive.length - 1];
+        lastActivityAt = Date.now();
+      } else if (isStreaming() || isThinking()) {
+        lastActivityAt = Date.now();
       }
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline || (Date.now() < hardDeadline && Date.now() - lastActivityAt < activeGraceMs)) {
         await sleep(pollMs);
         polls++;
         var streaming = isStreaming();
         var live = getLiveResponses(baseline);
         var text = live.length ? live[live.length - 1] : '';
         if (text) everLive = true;
+        // Activity bookkeeping for the flexible wait (v0.4.17): text
+        // still changing, or the page still showing streaming /
+        // thinking, means Gemini is still working — the deadline does
+        // not end the wait.
+        if (text && text !== lastLive) lastActivityAt = Date.now();
+        if (streaming || isThinking()) lastActivityAt = Date.now();
         if (text && text === lastLive) {
           if (stableSince === null) stableSince = Date.now();
           var stableFor = Date.now() - stableSince;
@@ -1656,8 +1727,14 @@
       var liveNow = getLiveResponses(baseline);
       var textNow = liveNow.length ? liveNow[liveNow.length - 1] : '';
       var stableForMs = (textNow && textNow === lastLive && stableSince !== null) ? (Date.now() - stableSince) : 0;
+      var extendedMs = Math.max(0, Date.now() - deadline);
       var blockReason;
-      if (polls === 0) {
+      if (Date.now() >= hardDeadline) {
+        // v0.4.17: the flexible wait ran into the hard cap while Gemini
+        // was still generating — the answer genuinely takes this long,
+        // the runner's recover poll (5 min) is the next net.
+        blockReason = 'hard cap reached (' + fmtDur(hardCapMs) + ' from ask start) while Gemini was still generating';
+      } else if (polls === 0) {
         // The wait never ran: the deadline was already past when
         // waiting started (model/thinking selection + send verification
         // ate the whole timeout budget). Nothing about completion can
@@ -1675,7 +1752,7 @@
       }
       return {
         ok: false,
-        error: 'gemini answer did not finish within timeout (' + Math.round((deadline - startedAt) / 1000) + 's) — ' + blockReason,
+        error: 'gemini answer did not finish within timeout (' + Math.round((deadline - startedAt) / 1000) + 's' + (extendedMs > 0 ? ', extended +' + fmtDur(extendedMs) + ' while generating' : '') + ') — ' + blockReason,
         partial: lastLive,
         polls: polls,
         elapsedMs: Date.now() - startedAt,
@@ -1736,6 +1813,12 @@
         // against this, so pre-existing page text (home screen, previous
         // turn) can never be reported as this turn's answer (task -006).
         var baseline = captureResponseBaseline();
+        // User-query turns BEFORE this prompt is filled: confirmSent
+        // proves the message left the box by requiring the query list
+        // to GROW with this prompt (v0.4.17) — a repeat of the previous
+        // turn's prompt must not count as proof (the old query would
+        // match by text alone).
+        var queriesBefore = getUserQueryTexts();
         // Remember this ask for recoverLastAnswer: the baseline is the
         // proof of what is new, so a previous turn's answer can never
         // be returned as this turn's (v0.4.13).
@@ -1765,6 +1848,14 @@
           if (isStreaming()) return true;
           if (!textOf(box.el)) return true;
           if (getLiveResponses(baseline).length) return true;
+          // v0.4.17 (verify33, 2026-11-22): the prompt appearing as a
+          // NEW user-query turn IS the send — the page renders the query
+          // the moment the message is submitted, before the box clears
+          // or streaming starts. verify33's Enter send was judged a
+          // failure while the OK was already in the tab, because none
+          // of the three branches above had fired yet on a slow page.
+          var qs = getUserQueryTexts();
+          if (qs.length > queriesBefore.length && promptMatchesQuery(String(prompt), qs[qs.length - 1])) return true;
           return false;
         };
         // Send attempts, in order, each verified with confirmSent
@@ -1864,7 +1955,7 @@
         var out = { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
         if (appliedThinking) out.appliedThinking = appliedThinking;
         if (thinkingWarning) out.thinkingWarning = thinkingWarning;
-        // v0.4.16: how completion was detected — 'stable' (flag clear) or
+        // v0.4.17: how completion was detected — 'stable' (flag clear) or
         // 'stable-while-streaming' (flag stuck, text stable past the
         // threshold). The router and runner log it; the done file does
         // not gain a field (file structure unchanged).
@@ -1900,6 +1991,7 @@
       listModels: listModels,
       selectModel: selectModel,
       selectThinkingLevel: selectThinkingLevel,
+      waitForMenuClosed: waitForMenuClosed,
       measureThinkingLevelItem: measureThinkingLevelItem,
       measureSendButton: measureSendButton,
       recoverLastAnswer: recoverLastAnswer,
