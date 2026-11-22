@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.10';
+  var VERSION = '0.4.11';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -93,6 +93,37 @@ importScripts(
       if (router) router.onAskResult(msg.taskId, msg.result);
       sendResponse({ ok: true });
       return false;
+    }
+    if (msg && msg.type === 'yixiubridge-trusted-click') {
+      // Content script wants a real (CDP) click on a thinking-level
+      // item (v0.4.11). The adapter already opened the submenu. Attach
+      // the debugger FIRST (the infobar shifts the viewport), wait for
+      // the layout to settle, then ask the content script to measure the
+      // item's centre, click it via CDP, and detach. Async — keep the
+      // channel open (return true).
+      var tabId = sender && sender.tab && sender.tab.id;
+      if (!tabId) { sendResponse({ ok: false, error: 'trusted-click: no tab id' }); return false; }
+      if (!debuggerMgr) { sendResponse({ ok: false, error: 'trusted-click: debugger manager not ready' }); return false; }
+      (async function () {
+        var attached = false;
+        try {
+          attached = await debuggerMgr.attach(tabId);
+          if (!attached) { sendResponse({ ok: false, error: 'debugger attach failed — is DevTools open on this tab?' }); return; }
+          await new Promise(function (r) { setTimeout(r, 150); });
+          var measured = await chrome.tabs.sendMessage(tabId, { from: 'yixiubridge-sw', type: 'measure-thinking-item', levelText: msg.levelText });
+          if (!measured || !measured.ok) { sendResponse({ ok: false, error: (measured && measured.error) || 'measure-thinking-item failed' }); return; }
+          await debuggerMgr.trustedClick(tabId, measured.x, measured.y);
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: 'trusted-click failed: ' + (e && e.message ? e.message : String(e)) });
+        } finally {
+          if (attached) {
+            await new Promise(function (r) { setTimeout(r, 100); });
+            await debuggerMgr.detach(tabId).catch(function () {});
+          }
+        }
+      })();
+      return true;
     }
     if (msg && msg.type === 'get_status') {
       sendResponse({
