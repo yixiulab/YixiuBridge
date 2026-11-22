@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-teacher-005",
-  "stage": "retrieving",
-  "detail": "ask failed: ask_gemini task task_mws9obmxnowhqj did not finish within 900s — poll get_answer with task_id task_mws9obmxnowhqj for th",
-  "updated_at": "2026-11-22T20:20:48.418Z",
+  "stage": "done",
+  "detail": "answer received (recovered from tab)",
+  "updated_at": "2026-11-22T20:21:04.409Z",
   "stages": [
     {
       "stage": "claimed",
@@ -23,6 +23,11 @@
       "stage": "retrieving",
       "at": "2026-11-22T20:20:48.418Z",
       "detail": "ask failed: ask_gemini task task_mws9obmxnowhqj did not finish within 900s — poll get_answer with task_id task_mws9obmxnowhqj for th"
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-22T20:21:04.409Z",
+      "detail": "answer received (recovered from tab)"
     }
   ]
 }
