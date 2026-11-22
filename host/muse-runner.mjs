@@ -173,13 +173,14 @@ export function logFilePath(date) {
   return 'tasks/log/' + y + '-' + m + '-' + day + '.json';
 }
 
-export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, askedThinking = null, answeredModel = null, adapterVersion = null, bridgeVersion = null, bridgeTaskId = null }) {
+export function buildLogEntry({ task, status, elapsedMs = null, error = null, askedModel = null, askedThinking = null, appliedThinking = null, answeredModel = null, adapterVersion = null, bridgeVersion = null, bridgeTaskId = null }) {
   return {
     id: task.id,
     status, // 'done' | 'failed'
     prompt: task.prompt.length > 200 ? task.prompt.slice(0, 200) + '…' : task.prompt,
     asked_model: askedModel,
     asked_thinking: askedThinking,
+    applied_thinking: appliedThinking,
     answered_model: answeredModel,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
@@ -520,7 +521,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, bridgeTaskId: taskId };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, appliedThinking: t.appliedThinking || null, bridgeTaskId: taskId };
       }
       if (t.status === 'failed') {
         // Keep the version tag in the message (it lands in the failed
@@ -574,7 +575,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
     const r = out.result || {};
     if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, overallDeadline, overallCapMs);
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, bridgeTaskId: r.task_id || null };
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
@@ -731,6 +732,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     elapsed_ms: answer.elapsedMs || null,
     asked_model: askedModel,
     asked_thinking: askedThinking,
+    applied_thinking: answer.appliedThinking || null,
     answered_model: answer.model || null,
     thinking_warning: answer.thinkingWarning || null,
     adapter_version: adapterVersion,
@@ -740,7 +742,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   };
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
-  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+  await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, appliedThinking: answer.appliedThinking || null, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
   return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId };
 }
 
