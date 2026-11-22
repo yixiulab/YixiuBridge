@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.5';
+  var ADAPTER_VERSION = '0.4.6';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1061,20 +1061,10 @@
       return { ok: true, level: selected };
     }
 
-    // Select a thinking level (e.g. "高" / "中" / "低") from the 思考等级
-    // submenu. The LEVEL itself is validated strictly (an unknown level
-    // is a caller error, code 'invalid-level'). Everything about APPLYING
-    // it is best-effort (code 'apply-failed'): the submenu may be
-    // missing, a click may miss, or the level may not stick — askImpl
-    // treats those as a warning and asks anyway instead of failing the
-    // whole task (v0.4.2: the real page left the button on "Neon" after
-    // choosing 高, which failed every ask until this was non-fatal).
-    // Verification (v0.4.5) reads the submenu's checked item via
-    // readSelectedThinkingLevel — never the picker button text, which
-    // misreported 高 in verify11 while the submenu showed 低.
-    async function selectThinkingLevel(level) {
-      var want = String(level || '').trim();
-      if (!want) return { ok: false, code: 'invalid-level', error: 'gemini thinking level is empty' };
+    // Open the model menu, open the 思考等级 submenu, click the given
+    // level item. Returns { ok: true } or an error object (invalid-level
+    // when the level is not in the menu, apply-failed otherwise).
+    async function clickThinkingLevelItem(want) {
       var opened = await openModelMenu();
       if (!opened.ok) return opened;
       var trigger = null;
@@ -1110,12 +1100,43 @@
         await closeModelMenu();
         return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
       }
-      var check = await readSelectedThinkingLevel();
-      if (check.ok && check.level === want) return { ok: true, thinking: want, applied: want };
-      if (check.ok && check.level) {
-        return { ok: false, code: 'apply-failed', applied: check.level, error: 'gemini thinking level did not stick — selected level is "' + check.level + '" after choosing "' + want + '"' };
+      return { ok: true };
+    }
+
+    // Select a thinking level (e.g. "高" / "中" / "低") from the 思考等级
+    // submenu. The LEVEL itself is validated strictly (an unknown level
+    // is a caller error, code 'invalid-level'). Everything about APPLYING
+    // it is best-effort (code 'apply-failed'): the submenu may be
+    // missing, a click may miss, or the level may not stick — askImpl
+    // treats those as a warning and asks anyway instead of failing the
+    // whole task (v0.4.2: the real page left the button on "Neon" after
+    // choosing 高, which failed every ask until this was non-fatal).
+    // Verification (v0.4.4) reads the submenu's checked item via
+    // readSelectedThinkingLevel — never the picker button text, which
+    // misreported 高 in verify11 while the submenu showed 低.
+    // Retry (v0.4.6): the real page sometimes swallows the first click
+    // on a submenu item (same quirk as the model menu's first click,
+    // v0.4.2) — verify14 proved a single click leaves the checkmark on
+    // 低. So click, verify, and retry up to 3 times before giving up.
+    async function selectThinkingLevel(level) {
+      var want = String(level || '').trim();
+      if (!want) return { ok: false, code: 'invalid-level', error: 'gemini thinking level is empty' };
+      var lastApplied = null;
+      var lastError = null;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        var clicked = await clickThinkingLevelItem(want);
+        if (!clicked.ok) return clicked;
+        await sleep(300);
+        var check = await readSelectedThinkingLevel();
+        if (check.ok && check.level === want) return { ok: true, thinking: want, applied: want };
+        if (check.ok && check.level) lastApplied = check.level;
+        if (check.error) lastError = check.error;
       }
-      return { ok: false, code: 'apply-failed', applied: null, error: 'gemini thinking level could not be confirmed after choosing "' + want + '"' + (check.error ? ' (' + check.error + ')' : '') };
+      await closeModelMenu();
+      if (lastApplied) {
+        return { ok: false, code: 'apply-failed', applied: lastApplied, error: 'gemini thinking level did not stick after 3 attempts — selected level is "' + lastApplied + '" after choosing "' + want + '"' };
+      }
+      return { ok: false, code: 'apply-failed', applied: null, error: 'gemini thinking level could not be confirmed after choosing "' + want + '"' + (lastError ? ' (' + lastError + ')' : '') };
     }
 
     // ---------- /model selection ----------
@@ -1212,7 +1233,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.5: read from the
+        // carries the ACTUALLY applied level (v0.4.6: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
