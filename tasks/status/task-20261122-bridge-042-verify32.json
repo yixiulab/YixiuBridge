@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-042-verify32",
-  "stage": "retrieving",
-  "detail": "ask failed: ask_gemini task task_mwsb1hfpxx460i did not finish within 900s — poll get_answer with task_id task_mwsb1hfpxx460i for th",
-  "updated_at": "2026-11-22T20:58:34.939Z",
+  "stage": "done",
+  "detail": "answer received (recovered from tab, unmatched)",
+  "updated_at": "2026-11-22T20:59:05.889Z",
   "stages": [
     {
       "stage": "claimed",
@@ -23,6 +23,11 @@
       "stage": "retrieving",
       "at": "2026-11-22T20:58:34.939Z",
       "detail": "ask failed: ask_gemini task task_mwsb1hfpxx460i did not finish within 900s — poll get_answer with task_id task_mwsb1hfpxx460i for th"
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-22T20:59:05.889Z",
+      "detail": "answer received (recovered from tab, unmatched)"
     }
   ]
 }
