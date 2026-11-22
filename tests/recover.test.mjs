@@ -84,6 +84,65 @@ test('recoverLastAnswer without a stored ask falls back to the user-query match'
   assert.match(miss.error, /never sent/);
 });
 
+// ---------- prompt rendering tolerance (v0.4.14) ----------
+// Background: teacher-testpc-004 (2026-11-22 18:15) missed recovery
+// while the prompt WAS in the tab — the v0.4.13 check wanted the
+// prompt's first 60 chars verbatim in the latest user-query turn, and
+// whatever the page did to the rendering broke that. The match is now
+// tolerant of a front prefix, a cut head and a cut tail, while a
+// genuinely different question still misses.
+
+const LONG_PROMPT = '请把老师关于 Windows 测试电脑一键安装脚本的那份完整回答再发一遍，包括 .bat 和 .ps1 的模板、提权写法和 winget 的三个坑，一个字都不要少，我要直接复制使用。';
+
+function latestQueryLine(page) {
+  const lines = page.doc.querySelectorAll('.query-text-line');
+  assert.ok(lines.length > 0, 'the mock page must have a user-query line');
+  return lines[lines.length - 1];
+}
+
+test('recoverLastAnswer matches when the query carries a front prefix and a cut head', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, realStructure: true });
+  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await asker.ask(LONG_PROMPT);
+  assert.equal(res.ok, true);
+  // The page shows the prompt with a short prefix in front and the
+  // first 30 chars cut — the strict head-60 check fails, the tail-40
+  // check must still match.
+  latestQueryLine(page).textContent = '你说：' + LONG_PROMPT.slice(30);
+  const fresh = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const rec = fresh.recoverLastAnswer(LONG_PROMPT);
+  assert.equal(rec.ok, true, 'expected a tail match, got: ' + JSON.stringify(rec));
+  assert.equal(rec.answer, '4 is the answer.');
+});
+
+test('recoverLastAnswer matches when the page shows only the first 40 chars of the prompt', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, realStructure: true });
+  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await asker.ask(LONG_PROMPT);
+  assert.equal(res.ok, true);
+  // Truncated tail: the strict head-60 check fails (the shown text is
+  // shorter than 60 chars), the reverse containment must still match.
+  latestQueryLine(page).textContent = LONG_PROMPT.slice(0, 40);
+  const fresh = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const rec = fresh.recoverLastAnswer(LONG_PROMPT);
+  assert.equal(rec.ok, true, 'expected a truncated-display match, got: ' + JSON.stringify(rec));
+  assert.equal(rec.answer, '4 is the answer.');
+});
+
+test('recoverLastAnswer still refuses a different question after rendering changes', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, realStructure: true });
+  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await asker.ask(LONG_PROMPT);
+  assert.equal(res.ok, true);
+  // Same rendering quirks, but the latest turn is a different question:
+  // the tolerant checks must not conjure a match out of it.
+  latestQueryLine(page).textContent = '你说：请把老师关于意大利小镇故事的那份选题清单再发一遍，包括庞贝和古罗马人的一天。';
+  const fresh = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const rec = fresh.recoverLastAnswer(LONG_PROMPT);
+  assert.equal(rec.ok, false);
+  assert.match(rec.error, /never sent/);
+});
+
 test('ask recovers the late answer when the send checks misjudge a slow page', async () => {
   // The click schedules streaming 150ms later, so every send check
   // (sendCheckMs 10ms) misjudges — the answer is already in the tab
