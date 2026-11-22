@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.7';
+  var ADAPTER_VERSION = '0.4.8';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1065,7 +1065,7 @@
     // event sequence (pointerdown, mousedown, pointerup, mouseup, click).
     // A bare el.click() only dispatches 'click'; the thinking-level
     // submenu items ignore it — verify15 proved 3 plain clicks leave
-    // the checkmark on 低 (v0.4.7 retry did not help). Falls back to
+    // the checkmark on 低 (v0.4.8 retry did not help). Falls back to
     // el.click() when the window has no MouseEvent (tests).
     function clickElement(el) {
       if (!el) return false;
@@ -1080,6 +1080,33 @@
         }
       } catch (e) { /* fall through to .click() */ }
       try { el.click(); return true; } catch (e2) { return false; }
+    }
+
+    // Find the element inside a level menu item that actually receives
+    // the selection. The selectable control (radio) lives inside the
+    // menu item, and a click on the container never reaches it (events
+    // bubble up, not down) — verify16 proved 3 full pointer sequences
+    // on the container leave the checkmark on 低. Order: inner radio,
+    // deepest element holding the level text (usually inside the radio's
+    // label, which activates the radio when clicked), the item itself.
+    function findLevelClickTarget(item, want) {
+      if (!item) return item;
+      if (typeof item.querySelector === 'function') {
+        try {
+          var inner = item.querySelector('input[type="radio"], [role="radio"], mat-radio-button');
+          if (inner) return inner;
+        } catch (e) { /* fall through */ }
+      }
+      var best = null;
+      var walk = function (el) {
+        var kids = el.children || [];
+        for (var i = 0; i < kids.length; i++) {
+          var kid = kids[i];
+          if (kid.textContent && kid.textContent.indexOf(want) !== -1) { best = kid; walk(kid); }
+        }
+      };
+      try { walk(item); } catch (e) { /* fall through */ }
+      return best || item;
     }
 
     // Open the model menu, open the 思考等级 submenu, click the given
@@ -1117,7 +1144,7 @@
         await closeModelMenu();
         return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
-      if (!clickElement(match)) {
+      if (!clickElement(findLevelClickTarget(match, want))) {
         await closeModelMenu();
         return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed' };
       }
@@ -1135,7 +1162,7 @@
     // Verification (v0.4.4) reads the submenu's checked item via
     // readSelectedThinkingLevel — never the picker button text, which
     // misreported 高 in verify11 while the submenu showed 低.
-    // Retry (v0.4.7): the real page sometimes swallows the first click
+    // Retry (v0.4.8): the real page sometimes swallows the first click
     // on a submenu item (same quirk as the model menu's first click,
     // v0.4.2) — verify14 proved a single click leaves the checkmark on
     // 低. So click, verify, and retry up to 3 times before giving up.
@@ -1254,7 +1281,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.7: read from the
+        // carries the ACTUALLY applied level (v0.4.8: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
