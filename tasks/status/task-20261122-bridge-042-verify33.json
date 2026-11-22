@@ -1,0 +1,13 @@
+{
+  "id": "task-20261122-bridge-042-verify33",
+  "stage": "claimed",
+  "detail": "bridge v0.4.16, 1 extension connected",
+  "updated_at": "2026-11-22T21:29:19.795Z",
+  "stages": [
+    {
+      "stage": "claimed",
+      "at": "2026-11-22T21:29:19.795Z",
+      "detail": "bridge v0.4.16, 1 extension connected"
+    }
+  ]
+}
