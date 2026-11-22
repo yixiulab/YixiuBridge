@@ -125,6 +125,14 @@ test('ask with a thinking level that does not stick warns and still answers (v0.
   assert.equal(page.picker.textContent, 'Neon 中');
 });
 
+test('model menu that swallows the first click still opens on retry (v0.4.2)', async () => {
+  const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, menuOpensOnClick: 2 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await adapter.ask('hello', { model: 'Neon' });
+  assert.equal(res.ok, true, 'a swallowed first click must not fail the ask');
+  assert.equal(res.answer, 'ok');
+});
+
 test('ask with model + thinking level applies both', async () => {
   const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10 });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
