@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -54,6 +54,7 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   // Model picker button (top of the page) + menu (present only while open).
   const models = MOCK_MODELS.map((m) => ({ ...m }));
   let currentLevel = initialLevel;
+  const levelClickCounts = {};
   let menu = null;
   let submenu = null;
 
@@ -79,7 +80,11 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
         // levelSticks: false simulates the real page (2026-11-21) where
         // the click registers but the picker button never shows the new
         // level (v0.4.2: ask must warn and continue, not fail).
-        if (levelSticks) {
+        // levelClicksToStick: 2 simulates the real page (2026-11-22,
+        // verify14) where the first click on a level is swallowed and
+        // only a retry sticks (v0.4.6).
+        levelClickCounts[lv] = (levelClickCounts[lv] || 0) + 1;
+        if (levelSticks && levelClickCounts[lv] >= levelClicksToStick) {
           currentLevel = lv;
           picker.textContent = pickerText();
         }
