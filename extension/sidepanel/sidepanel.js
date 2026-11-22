@@ -27,7 +27,7 @@
         setDot(document.getElementById('st-bridge'), st.bridge.connected, st.bridge.connected ? '已连接' : '未连接（桥服务可能没启动）');
         document.getElementById('st-profile').textContent = (st.profile && st.profile.label) || '—';
         document.getElementById('st-controller').textContent = st.controller || '无（空闲）';
-        document.getElementById('st-version').textContent = st.version || '0.4.9';
+        document.getElementById('st-version').textContent = st.version || '0.4.10';
         if (labelEl && !labelEl.value) labelEl.value = (st.profile && st.profile.label) || '';
       }
     } catch (e) { /* service worker asleep — retry on next tick */ }
