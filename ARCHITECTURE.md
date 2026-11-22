@@ -228,3 +228,17 @@ CDP 真实点击也粘不住（verify23：0.4.11 回 OK 但 `applied_thinking` �
 修法（四层）：(1) abort 对齐总预算——`abortMs` 改成 `overallCapMs`（15 分钟），fetch 不再在桥回 pending 之前先断；桥的定时器 ~300 秒回 pending + task_id 后 `pollTask` 接着轮询，abort 只在桥本身挂住时才触发兜底。(2) 新增 `recover_last_answer` 工具（第 8 个 MCP 工具）：桥端不占任务锁（60 秒上限），路由器用 `_findGeminiTab` 直接找标签页、**绝不重载**（重载会毁掉要找回的答案），内容脚本调适配器 `recoverLastAnswer(prompt)` 读当前页最后一条完整回答，不重新发问。适配器的守卫：有本轮 baseline 时只认本轮新出现/变化的回答；没有 baseline 时要求最新一条 user-query 必须带有本次 prompt；回答还在流式时拒绝；三者都过才返回。`recovered` 字段沿适配器 → 路由器存档/返回 → 桥 → runner → done 文件全程直通（0.4.5 的教训：字段必须沿链路数一遍）。runner 在 `ask` 失败后先调一次恢复接口，取到就写 done（`recovered: true`），取不到才写 failed。(3) 发送改多路重试：先聚焦输入框、确认没有菜单遮挡（菜单还开着就先关掉），再依次试普通点击、回车、CDP 真实点击（`requestTrustedSendClick`，复用 0.4.11 的 `Input.dispatchMouseEvent` 路径，内容脚本 `measure-send-button` 量发送按钮中心）、完整指针序列（`clickElement`），仍不成功才轮询恢复 1 秒再判失败。(4) `pollTask` 改先读状态再看 deadline：卡在 deadline 整点答完的任务也不再被丢掉。
 
 Mock 同步：`FakeWindow` 补 `MouseEvent`/`PointerEvent`（`clickElement` 的指针序列在测试里真正走通）；mock 发送按钮新增 `sendNeedsPointerSequence`（裸点击被忽略、只有指针序列能发）、`sendStartsOnTrustedClick`（只有 CDP 真实点击能发）、`sendStartsLateMs`（点击后延迟才开始流式，发送检查全部误判、只能靠恢复）；`startStreaming` 在默认结构里也建 user-query turn（和真实页面一致，恢复才能凭它证明 prompt 已发出）。新增 `tests/recover.test.mjs`（适配器恢复的守卫 + 路由器恢复不重载标签页），runner 测试补 abort 对齐与三路恢复（abort 后取到 → done、send 未注册后取到 → done、取不到 → failed），send-button 测试补指针序列与 CDP 真实点击发送。
+
+## 恢复改轮询 5 分钟（v0.4.14）
+
+2026-11-22 18:15 teacher-testpc-004 暴露：0.4.13 的恢复只试一次——答案还在流式就拒绝、答案晚到几分钟也取不回，失败文件已写完才到。改成失败后轮询 5 分钟（每 15 秒一次，直到答案出现）；失败文件记 `recover_error` 和 `recover_attempts`，下次诊断直接读原因不再猜；提示匹配加前后容错（“你说”前缀、截断显示）。verify30 真机证实：`recovered: true`，第一次没取到、轮询后从标签页里取回来了，答案和老师 18:05 贴的全文一致。注：0.4.14 发版时 builds.json 漏记了这一条（2026-11-22 20:20 查实远程 builds.json 只到 0.4.13），0.4.15 补记。
+
+## 任务进度可见 + 恢复不再丢标签页里的答案（v0.4.15）
+
+2026-11-22 20:20 用户下令：把所有任务停掉、重新发一个任务，任务必须有看得见的进度（能看到它在跑、任务已领取、到什么程度），老师已经回答出来了、取不到就是桥的问题，必须优化好、能正常取到老师回答的内容。
+
+两件事。第一，进度可见：runner 在 `tasks/status/<id>.json` 里按阶段写状态——`claimed`（已领取，附桥版本与扩展数）→ `sending`（发送中，附模型与思考等级）→ `waiting`（等 Gemini 回答，附 bridge task_id，`ask` 进轮询时由 `onProgress` 回调触发）→ `retrieving`（取答案，附失败原因）→ `done` / `failed`（终态）。每阶段带时间戳与 detail，写失败绝不拖垮任务（best-effort，记日志继续跑）；done / failed 文件也带完整 `stages` 历史。进度文件就在仓库里，`tasks/status/<id>.json` 直接能看；Muse 读它向用户报进度。
+
+第二，取答案可靠：(1) 模型选择按钮找不到时不再一次判死——`openModelMenu` 先等 15 秒（每 500 毫秒找一次），冷标签页/页面未渲染完就直接失败正是 teacher-003 的死法（20:18，`gemini model picker button not found`，问题根本没发出去，恢复 21 次都说“the prompt was never sent”）。(2) 恢复不再因匹配不上就丢答案：`recoverLastAnswer` 无 baseline 且 prompt 对不上最新 user-query 时，改成把标签页里最新一条完整回答取回来、标 `unmatched: true`（明说没对上号），只有标签页里根本没有回答、或答案还在流式时才继续拒绝。`unmatched` 沿内容脚本 → 路由器 → runner 全程直通，done 文件记 `recovered_unmatched: true`，读者一看就知道这条答案没验过号、可能属于另一道题。用户原话：老师已经回答出来了、取不到就是桥的问题——桥宁可把答案取回来标明出处，也不再把用户已经能看到的答案丢掉。
+
+测试：恢复的 3 个旧测试改按新行为断言（不匹配时返回 unmatched 而不是拒绝）；runner 新增进度测试（状态文件阶段序列 claimed→sending→done，done 文件带 stages；失败后恢复 unmatched 时阶段为 claimed→sending→retrieving→done，`recovered_unmatched: true`）；模型选择新增“按钮晚出现 300 毫秒也能找到”的重试测试。`taskFilePaths` 新增 `status` 一项。
