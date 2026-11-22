@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-bridge-042-verify6",
+  "error": "ask_gemini failed: Gemini content script did not answer even after reloading the tab once — are you logged in to gemini.google.com in this Chrome profile?",
+  "adapter_version": null,
+  "bridge_version": "0.4.2",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T07:00:11.195Z"
+}
