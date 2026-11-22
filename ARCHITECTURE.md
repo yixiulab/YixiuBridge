@@ -204,3 +204,9 @@ verify17（0.4.8）回 OK，但思考等级这一步根本没走到：警告是�
 ## 思考等级改方向键走菜单（v0.4.10）
 
 用户的方法：子菜单默认第一项，下两下到高，按回车选中——用菜单自己的方向键导航，而不是去点某个具体元素。修法：新增 `navigateToLevelByArrows`，聚焦当前打勾项，按上下键走到目标项、按回车；顺序从页面实时读（levels 数组），不写死，所以不管页面把等级排成 低/中/高 还是 高/中/低 都能走到；重试 3 次里第 1、3 次用方向键，第 2 次用聚焦+回车（v0.4.9），鼠标点击当最后后备。Mock 的等级顺序改成 低/中/高（和高在第三位、两下能到相符），子菜单加共享的 focusedIdx 和方向键处理；新增测试：点击无效、从 低 出发两下到 高、回车选中，`appliedThinking` 为 高、无警告。209 测试全过。注意：如果方向键也不管用，下一步是用浏览器调试接口发真人点击（CDP Input.dispatchMouseEvent，带真实坐标、isTrusted 为真），不要再换合成事件。
+
+## 思考等级改 CDP 真实点击（v0.4.11）
+
+方向键也不管用（verify19：0.4.10 回 OK 但 `applied_thinking` 仍是 低）——鼠标点击、真人式点击、点子元素、聚焦+回车、方向键导航，六种合成输入全试过都不粘。用户让去问老师（Gemini），老师的答案：最可能的原因是内容脚本隔离世界（ISOLATED World）——内容脚本的 `new MouseEvent` 在页面 Angular 代码里 `instanceof window.MouseEvent` 返回 false、直接被丢弃；也可能页面校验了 `isTrusted` 或菜单项依赖真实指针进入才更新内部状态。localStorage/URL 参数/内部 API 都不可行（配置在内存 Service 状态里、刷新会被服务端偏好覆盖；RPC 字段是私有协议常变）；劫持 `addEventListener` 伪造 isTrusted 不推荐（副作用大）。
+
+修法（老师给的方案，原样落地）：改用 CDP `Input.dispatchMouseEvent` 发真实点击（isTrusted 为真）。链路：适配器打开子菜单、找到目标项后，先走注入的 `requestTrustedClick`（内容脚本 `chrome.runtime.sendMessage` 到后台）；后台 service worker 用现成的 `DebuggerManager` attach 到该标签页（`chrome.debugger`，manifest 里早已有 debugger 权限），等 150ms 让调试横幅把视口顶下去、布局稳定，再发 `measure-thinking-item` 让内容脚本量目标项中心坐标（`getBoundingClientRect`，视口 CSS 像素，不乘 devicePixelRatio、不加滚动），然后按 mouseMoved → mousePressed → mouseReleased 三步发 CDP 事件（各隔 40ms），最后 detach。合成点击/键盘/方向键全部保留当后备（CDP 不可用或失败时用，比如 DevTools 正开着、attach 失败）。新增：`DebuggerManager.trustedClick`、`measureThinkingLevelItem`（适配器，暴露给内容脚本）、内容脚本的 `requestTrustedClick`（15 秒超时防挂起）与 `measure-thinking-item` 处理、后台的 `yixiubridge-trusted-click` 处理。Mock 的等级项加 `__trustedClick`（绕过 levelSticks/levelClickDead，直接应用等级，模拟 CDP 真实点击）；FakeElement 加 `getBoundingClientRect`（固定矩形，中心 160,218）。新增测试：合成全无效时 CDP 点击照常选上 `appliedThinking` 为 高、无警告；`trustedClick` 发出 mouseMoved/Pressed/Released 三步且参数正确。211 测试全过。
