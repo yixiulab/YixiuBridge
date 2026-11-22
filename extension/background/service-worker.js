@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.11';
+  var VERSION = '0.4.12';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -96,7 +96,7 @@ importScripts(
     }
     if (msg && msg.type === 'yixiubridge-trusted-click') {
       // Content script wants a real (CDP) click on a thinking-level
-      // item (v0.4.11). The adapter already opened the submenu. Attach
+      // item (v0.4.12). The adapter already opened the submenu. Attach
       // the debugger FIRST (the infobar shifts the viewport), wait for
       // the layout to settle, then ask the content script to measure the
       // item's centre, click it via CDP, and detach. Async — keep the
