@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -75,21 +75,27 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
     submenu = new FakeElement('div', { role: 'menu' });
     for (const lv of MOCK_LEVELS) {
       const item = new FakeElement('div', { role: 'menuitem', 'aria-checked': lv === currentLevel ? 'true' : 'false' });
-      item.textContent = lv;
-      item.addEventListener('click', () => {
-        // levelSticks: false simulates the real page (2026-11-21) where
-        // the click registers but the picker button never shows the new
-        // level (v0.4.2: ask must warn and continue, not fail).
-        // levelClicksToStick: 2 simulates the real page (2026-11-22,
-        // verify14) where the first click on a level is swallowed and
-        // only a retry sticks (v0.4.6).
+      // levelRadioInside: the selectable radio lives INSIDE the menu item
+      // and only a click on the radio applies the level — a click on the
+      // container does nothing (v0.4.8: verify16 proved 3 full pointer
+      // sequences on the container leave the level on 低).
+      const applyLevel = () => {
         levelClickCounts[lv] = (levelClickCounts[lv] || 0) + 1;
         if (levelSticks && levelClickCounts[lv] >= levelClicksToStick) {
           currentLevel = lv;
           picker.textContent = pickerText();
         }
         closeMenu();
-      });
+      };
+      if (levelRadioInside) {
+        const radio = new FakeElement('span', { role: 'radio' });
+        radio.textContent = lv;
+        radio.addEventListener('click', applyLevel);
+        item.appendChild(radio);
+      } else {
+        item.textContent = lv;
+        item.addEventListener('click', applyLevel);
+      }
       submenu.appendChild(item);
     }
     doc.body.appendChild(submenu);
