@@ -178,9 +178,15 @@ test('ask with a thinking level that synthetic events cannot move applies it by 
   const requestTrustedClick = async (want) => {
     trustedClickCalls.push(want);
     measured = adapter.measureThinkingLevelItem(want);
-    const items = page.doc.querySelectorAll('[role="menuitem"]');
+    // Level items are menuitemradio with text "<level> <description>"
+    // (e.g. "高 超级详尽"); match by the first token, exactly — a
+    // substring match would hit 低 first, because "高" is inside
+    // "高效" in 低's description (v0.4.12).
+    const items = page.doc.querySelectorAll('[role="menuitemradio"]');
     for (const it of items) {
-      if (it.__trustedClick && (it.textContent || '').trim() === want) {
+      if (!it.__trustedClick) continue;
+      const first = (it.textContent || '').trim().split(/\s+/)[0];
+      if (first === want) {
         it.__trustedClick();
         return { ok: true };
       }
@@ -198,6 +204,24 @@ test('ask with a thinking level that synthetic events cannot move applies it by 
   assert.equal(measured && measured.ok, true);
   assert.equal(measured.x, 160, 'centre x of the fixed fake rect (100 + 120/2)');
   assert.equal(measured.y, 218, 'centre y of the fixed fake rect (200 + 36/2)');
+});
+
+test('asking for 高 matches the 高 item, not 低 whose description contains 高 (v0.4.12)', async () => {
+  // Regression: the real submenu items carry a description after the
+  // level name ("低 快速、高效" / "中 深度适中" / "高 超级详尽"), and
+  // "高" is a substring of "高效" in 低's description. A substring
+  // match for "高" therefore hits 低 first — every version since 0.4.4
+  // clicked 低 when asked for 高 on the real page (verify23/24), while
+  // the mock (no descriptions) never caught it. Matching must be by
+  // exact level label. Plain synthetic clicks here (levelSticks default).
+  const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, initialLevel: '低' });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 15000 });
+  const res = await adapter.ask('hello', { thinking: '高' });
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, 'ok');
+  assert.equal(res.appliedThinking, '高');
+  assert.equal(res.thinkingWarning, undefined);
+  assert.equal(page.picker.textContent, 'Neon 高');
 });
 
 test('ask with a thinking level that does not stick warns and still answers (v0.4.2)', async () => {
