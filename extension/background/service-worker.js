@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.8';
+  var VERSION = '0.4.9';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
