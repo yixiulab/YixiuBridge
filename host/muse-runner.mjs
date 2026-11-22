@@ -558,11 +558,14 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
 
   // Read the latest COMPLETE answer already in the Gemini tab, without
   // asking again (v0.4.13, recover_last_answer). Returns the recovered
-  // answer (with recovered:true) or null when the tab has nothing to
-  // return — the prompt never left the box, the answer is still
-  // streaming, or the bridge/extension did not answer. Never throws:
-  // recovery is best-effort, and a miss just means the caller writes
-  // the failed file as before.
+  // answer (with recovered:true), or { error } when the tab has nothing
+  // to return — the prompt never left the box, the answer is still
+  // streaming, or the bridge/extension did not answer (v0.4.14: the
+  // reason is returned instead of a bare null, so the failed file can
+  // say WHY recovery missed instead of forcing a guess). Returns null
+  // only when the bridge itself could not be reached at all. Never
+  // throws: recovery is best-effort, and a miss just means the caller
+  // writes the failed file as before.
   async function recoverLastAnswer(prompt) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 60000);
@@ -573,11 +576,11 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         body: JSON.stringify({ tool: 'recover_last_answer', params: { prompt: prompt || '' }, clientId: RUNNER_CLIENT_ID }),
         signal: ctrl.signal,
       });
-      if (!res.ok) return null;
+      if (!res.ok) return { error: 'recover_last_answer: bridge call failed (HTTP ' + res.status + ')' };
       const out = await res.json();
-      if (!out.ok) return null;
+      if (!out.ok) return { error: out.error || 'recover_last_answer: bridge call failed' };
       const r = out.result || {};
-      if (!r.answer) return null;
+      if (!r.answer) return { error: r.error || 'recover_last_answer: no answer in the tab' };
       return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true };
     } catch (e) {
       return null;
@@ -671,7 +674,7 @@ async function appendLog(github, entry, log) {
 // Process ONE pending task (the oldest). Returns a status object; never
 // throws for a single bad task — only GitHub/bridge outages propagate
 // (the run loop turns rate limits into backoff).
-export async function processOneTask({ github, bridge, log = () => {}, chromeOpener = null } = {}) {
+export async function processOneTask({ github, bridge, log = () => {}, chromeOpener = null, recoverBudgetMs = 300000, recoverPollMs = 15000 } = {}) {
   const list = await github.listPending();
   if (!list.length) return { status: 'empty' };
 
@@ -770,18 +773,41 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     // v0.4.13 (teacher-testpc-002/003): the ask failed, but the answer
     // may already be in the Gemini tab — the fetch aborted with no
     // task_id, or the send check misjudged a slow page. Read the tab
-    // once before writing a failed file; a recovered answer is written
-    // as done (marked recovered) instead. A miss just falls through to
+    // before writing a failed file; a recovered answer is written as
+    // done (marked recovered) instead. A miss just falls through to
     // the failed file as before. Fake bridges in old tests have no
     // recoverLastAnswer — the typeof guard keeps them working.
+    // v0.4.14 (teacher-testpc-004, 2026-11-22 18:15): a single read is
+    // NOT enough. That probe failed with "no response appeared" while
+    // Gemini was still thinking (high thinking level, long answer),
+    // the one-shot recovery ran while the answer was still streaming
+    // and refused — and the answer arrived in the tab minutes later,
+    // after the failed file was already written. So recovery now POLLS
+    // for up to recoverBudgetMs (default 5 minutes), every
+    // recoverPollMs, and the last miss reason is kept: when recovery
+    // still finds nothing, the failed file carries recover_error and
+    // recover_attempts, so the next diagnosis reads the reason instead
+    // of guessing it.
+    let recoverError = null;
+    let recoverAttempts = 0;
     if (typeof bridge.recoverLastAnswer === 'function') {
-      let recovered = null;
-      try {
-        recovered = await bridge.recoverLastAnswer(task.prompt);
-      } catch (recErr) { /* recovery is best-effort; fall through to failed */ }
-      if (recovered && recovered.answer) {
-        log('ask 失败（' + (e.message || String(e)).slice(0, 120) + '），但从 Gemini 标签页找回了答案 — 按完成处理');
-        answer = recovered;
+      const recoverDeadline = Date.now() + recoverBudgetMs;
+      while (!answer) {
+        let rec = null;
+        try {
+          rec = await bridge.recoverLastAnswer(task.prompt);
+        } catch (recErr) {
+          recoverError = (recErr && recErr.message) || String(recErr);
+        }
+        recoverAttempts++;
+        if (rec && rec.answer) {
+          log('ask 失败（' + (e.message || String(e)).slice(0, 120) + '），但从 Gemini 标签页找回了答案 — 按完成处理');
+          answer = rec;
+          break;
+        }
+        if (rec && rec.error) recoverError = rec.error;
+        if (Date.now() >= recoverDeadline) break;
+        await sleep(Math.max(0, Math.min(recoverPollMs, recoverDeadline - Date.now())));
       }
     }
     if (!answer) {
@@ -792,11 +818,11 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
       // v0.3.4: the failed file carries the bridge task_id whenever one
       // exists, so the answer can still be retrieved later via get_answer
       // even when this run gave up (e.g. the 15-minute poll cap ran out).
-      const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, failed_at: new Date().toISOString() };
+      const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, recover_error: recoverError, recover_attempts: recoverAttempts, failed_at: new Date().toISOString() };
       await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
       await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
       await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, askedThinking, adapterVersion, bridgeVersion, bridgeTaskId }), log);
-      return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId };
+      return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId, recoverError, recoverAttempts };
     }
   }
 
