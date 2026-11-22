@@ -1,0 +1,39 @@
+{
+  "id": "task-20261122-bridge-042-verify33",
+  "answer": "OK",
+  "model": "gemini-web",
+  "elapsed_ms": null,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "applied_thinking": null,
+  "answered_model": "gemini-web",
+  "thinking_warning": null,
+  "recovered": true,
+  "recovered_unmatched": false,
+  "adapter_version": "0.4.16",
+  "bridge_version": "0.4.16",
+  "bridge_task_id": null,
+  "stages": [
+    {
+      "stage": "claimed",
+      "at": "2026-11-22T21:29:19.795Z",
+      "detail": "bridge v0.4.16, 1 extension connected"
+    },
+    {
+      "stage": "sending",
+      "at": "2026-11-22T21:29:20.593Z",
+      "detail": "model Neon, thinking 高"
+    },
+    {
+      "stage": "retrieving",
+      "at": "2026-11-22T21:29:35.402Z",
+      "detail": "ask failed: ask_gemini failed: ask_gemini: gemini send button not found — Enter fallback also did not send the prompt (tried: icon ["
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-22T21:31:06.352Z",
+      "detail": "answer received (recovered from tab)"
+    }
+  ],
+  "answered_at": "2026-11-22T21:31:07.212Z"
+}
