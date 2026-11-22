@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-042-verify33",
-  "stage": "retrieving",
-  "detail": "ask failed: ask_gemini failed: ask_gemini: gemini send button not found — Enter fallback also did not send the prompt (tried: icon [",
-  "updated_at": "2026-11-22T21:29:35.402Z",
+  "stage": "done",
+  "detail": "answer received (recovered from tab)",
+  "updated_at": "2026-11-22T21:31:06.352Z",
   "stages": [
     {
       "stage": "claimed",
@@ -18,6 +18,11 @@
       "stage": "retrieving",
       "at": "2026-11-22T21:29:35.402Z",
       "detail": "ask failed: ask_gemini failed: ask_gemini: gemini send button not found — Enter fallback also did not send the prompt (tried: icon ["
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-22T21:31:06.352Z",
+      "detail": "answer received (recovered from tab)"
     }
   ]
 }
