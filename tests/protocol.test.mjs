@@ -103,6 +103,19 @@ class SimulatedExtension {
         case 'ask_gemini':
           out = { ok: true, result: await this._askGemini(params) };
           break;
+        case 'recover_last_answer': {
+          // Mirrors the real router: read the last COMPLETE answer off
+          // the mock page the previous ask ran on, without asking again.
+          if (!this.lastAdapter) {
+            out = { ok: false, error: 'recover_last_answer: no previous ask on this page' };
+            break;
+          }
+          const rec = this.lastAdapter.recoverLastAnswer(params.prompt || '');
+          out = rec.ok
+            ? { ok: true, result: { answer: rec.answer, model: 'gemini-web', adapter_version: Adapter.ADAPTER_VERSION, recovered: true } }
+            : { ok: false, error: 'recover_last_answer: ' + rec.error };
+          break;
+        }
         default:
           out = { ok: false, error: 'unknown tool: ' + tool };
       }
@@ -123,6 +136,8 @@ class SimulatedExtension {
       chunkMs: slow ? 500 : 10,
     });
     const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, timeoutMs: 30000 });
+    this.lastAdapter = adapter;
+    this.lastPage = page;
     const started = Date.now();
     this.tasks.set(taskId, { status: 'running', startedAt: started });
     const doneP = adapter.ask(params.prompt || '').then((res) => {
@@ -230,7 +245,7 @@ test('MCP initialize is rejected without a pairing window', async () => {
   rpc.child.kill();
 });
 
-test('pairing window authorizes the first client; tools/list exposes the 7 tools', async () => {
+test('pairing window authorizes the first client; tools/list exposes the 8 tools', async () => {
   const res = await fetch(bridgeUrl + '/pair/start', { method: 'POST' });
   assert.equal(res.status, 200);
   const rpc = spawnMcp();
@@ -239,7 +254,7 @@ test('pairing window authorizes the first client; tools/list exposes the 7 tools
   rpc.notify('notifications/initialized');
   const list = await rpc.call('tools/list', {});
   const names = list.tools.map((t) => t.name);
-  for (const n of ['ping', 'tabs_context', 'navigate', 'read_page', 'list_models', 'ask_gemini', 'get_answer']) {
+  for (const n of ['ping', 'tabs_context', 'navigate', 'read_page', 'list_models', 'ask_gemini', 'get_answer', 'recover_last_answer']) {
     assert.ok(names.includes(n), 'missing tool ' + n);
   }
   rpc.child.kill();
@@ -263,8 +278,8 @@ test('/status reports the version on disk (disk_version, read fresh from package
   assert.equal(res.status, 200);
   const st = await res.json();
   assert.equal(st.ok, true);
-  assert.equal(st.version, '0.4.12');
-  assert.equal(st.disk_version, '0.4.12');
+  assert.equal(st.version, '0.4.13');
+  assert.equal(st.disk_version, '0.4.13');
 });
 
 test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adapter -> mock page)', async () => {
@@ -275,6 +290,22 @@ test('ask_gemini returns the mock answer end-to-end (bridge -> extension -> adap
   const res = JSON.parse(out.content[0].text);
   assert.equal(res.answer, '4 is the answer.');
   assert.equal(res.model, 'gemini-web');
+  rpc.child.kill();
+});
+
+test('recover_last_answer returns the tab answer without re-asking (v0.4.13)', async () => {
+  const rpc = spawnMcp();
+  await rpc.call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'TestClient', version: '1.0' } });
+  const out = await rpc.call('tools/call', { name: 'ask_gemini', arguments: { prompt: 'What is 2+2?', timeout_s: 30 } });
+  assert.equal(out.isError, false);
+  assert.equal(JSON.parse(out.content[0].text).answer, '4 is the answer.');
+  // Recovery reads the same tab, with no lock and no second ask: it
+  // must work even though no ask is currently running.
+  const rec = await rpc.call('tools/call', { name: 'recover_last_answer', arguments: { prompt: 'What is 2+2?' } });
+  assert.equal(rec.isError, false);
+  const body = JSON.parse(rec.content[0].text);
+  assert.equal(body.answer, '4 is the answer.');
+  assert.equal(body.recovered, true);
   rpc.child.kill();
 });
 
