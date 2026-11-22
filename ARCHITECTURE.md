@@ -242,3 +242,12 @@ Mock 同步：`FakeWindow` 补 `MouseEvent`/`PointerEvent`（`clickElement` 的�
 第二，取答案可靠：(1) 模型选择按钮找不到时不再一次判死——`openModelMenu` 先等 15 秒（每 500 毫秒找一次），冷标签页/页面未渲染完就直接失败正是 teacher-003 的死法（20:18，`gemini model picker button not found`，问题根本没发出去，恢复 21 次都说“the prompt was never sent”）。(2) 恢复不再因匹配不上就丢答案：`recoverLastAnswer` 无 baseline 且 prompt 对不上最新 user-query 时，改成把标签页里最新一条完整回答取回来、标 `unmatched: true`（明说没对上号），只有标签页里根本没有回答、或答案还在流式时才继续拒绝。`unmatched` 沿内容脚本 → 路由器 → runner 全程直通，done 文件记 `recovered_unmatched: true`，读者一看就知道这条答案没验过号、可能属于另一道题。用户原话：老师已经回答出来了、取不到就是桥的问题——桥宁可把答案取回来标明出处，也不再把用户已经能看到的答案丢掉。
 
 测试：恢复的 3 个旧测试改按新行为断言（不匹配时返回 unmatched 而不是拒绝）；runner 新增进度测试（状态文件阶段序列 claimed→sending→done，done 文件带 stages；失败后恢复 unmatched 时阶段为 claimed→sending→retrieving→done，`recovered_unmatched: true`）；模型选择新增“按钮晚出现 300 毫秒也能找到”的重试测试。`taskFilePaths` 新增 `status` 一项。
+
+## 计划：更新检查改 30 分钟（v0.4.16，待 0.4.15 真机验证通过后做）
+
+2026-11-22 20:55 用户定：0.4.15 还没在真机上测过，等测完、没问题的话，0.4.16 把 runner 空闲更新检查
+`UPDATE_CHECK_INTERVAL_MS` 从 2 分钟改成 30 分钟。2 分钟是测试时才设的（用户 2026-11-22 09:27 建议，
+为的是新版几分钟内自己装上）；正常用太勤（一小时查 30 次，一天 720 次，全是“已经是最新”）。
+也不回 1 小时：0.4.3 时 1 小时吃过亏（检查刚跑完没更新、计时重置，又等一小时，最后还是用户双击 .bat）。
+30 分钟是中间值：新稳定版最多半小时自己装上，一天只查 48 次；检查本身很轻（空闲时才查，两次小请求，
+GitHub 限额一小时 5000 次，30 次/小时连零头都不到）。条件：0.4.15 真机验证通过后再改。
