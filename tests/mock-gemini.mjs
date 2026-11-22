@@ -25,7 +25,7 @@ const MOCK_MODELS = [
   { label: '更深入的分析', description: '', codename: 'Neon', selected: true, locked: false },
   { label: '代码和复杂工作', description: '', codename: 'Carbon', selected: false, locked: true },
 ];
-const MOCK_LEVELS = ['高', '中', '低'];
+const MOCK_LEVELS = ['低', '中', '高'];
 
 export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
@@ -73,37 +73,48 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
   function openSubmenu() {
     if (submenu) return;
     submenu = new FakeElement('div', { role: 'menu' });
+    // Arrow-key navigation (v0.4.10): the submenu's keyboard focus
+    // starts on the checked level; ArrowDown/ArrowUp move it, Enter
+    // applies the focused level. Shared across the items because the
+    // mock does not bubble keydown events to the menu container.
+    let focusedIdx = Math.max(0, MOCK_LEVELS.indexOf(currentLevel));
+    const applyLevelFor = (lv) => {
+      levelClickCounts[lv] = (levelClickCounts[lv] || 0) + 1;
+      if (levelSticks && levelClickCounts[lv] >= levelClicksToStick) {
+        currentLevel = lv;
+        picker.textContent = pickerText();
+      }
+      closeMenu();
+    };
+    const onLevelKey = (ev) => {
+      if (ev.key === 'ArrowDown') { focusedIdx = Math.min(focusedIdx + 1, MOCK_LEVELS.length - 1); }
+      else if (ev.key === 'ArrowUp') { focusedIdx = Math.max(focusedIdx - 1, 0); }
+      else if (ev.key === 'Enter' || ev.key === ' ') { applyLevelFor(MOCK_LEVELS[focusedIdx]); }
+    };
     for (const lv of MOCK_LEVELS) {
       const item = new FakeElement('div', { role: 'menuitem', 'aria-checked': lv === currentLevel ? 'true' : 'false' });
       // levelRadioInside: the selectable radio lives INSIDE the menu item
       // and only a click on the radio applies the level — a click on the
       // container does nothing (v0.4.8: verify16 proved 3 full pointer
       // sequences on the container leave the level on 低).
-      const applyLevel = () => {
-        levelClickCounts[lv] = (levelClickCounts[lv] || 0) + 1;
-        if (levelSticks && levelClickCounts[lv] >= levelClicksToStick) {
-          currentLevel = lv;
-          picker.textContent = pickerText();
-        }
-        closeMenu();
-      };
       // levelClickDead: mouse clicks on the level items do nothing
       // (simulates the real page, verify15/16) — only keyboard Enter /
       // Space activates the level (v0.4.9).
-      const applyByKey = (ev) => {
-        if (ev.key === 'Enter' || ev.key === ' ') applyLevel();
-      };
+      const applyLevel = () => applyLevelFor(lv);
       if (levelRadioInside) {
         const radio = new FakeElement('span', { role: 'radio' });
         radio.textContent = lv;
         radio.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
-        radio.addEventListener('keydown', applyByKey);
+        radio.addEventListener('keydown', onLevelKey);
         item.appendChild(radio);
       } else {
         item.textContent = lv;
         item.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
-        item.addEventListener('keydown', applyByKey);
       }
+      // Arrow-key navigation (v0.4.10) is dispatched on the level item
+      // itself, so the item always carries the key handler (the radio
+      // carries it too for the focus+Enter path).
+      item.addEventListener('keydown', onLevelKey);
       submenu.appendChild(item);
     }
     doc.body.appendChild(submenu);
