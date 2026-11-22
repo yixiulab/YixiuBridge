@@ -350,6 +350,30 @@ test('ask_gemini success result carries adapter_version through', async () => {
   assert.equal(res.result.adapter_version, '0.2.0-test');
 });
 
+test('ask_gemini success result carries thinking level fields through (v0.4.5)', async () => {
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'ask_gemini') {
+        // The adapter reports what it actually used plus any warning;
+        // the router must not drop them (verify13: done file showed
+        // applied_thinking null with no warning although the adapter
+        // had computed both).
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10, adapter_version: '0.2.0-test', thinkingWarning: 'gemini thinking level did not stick — selected level is "中"', appliedThinking: '中' }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', timeout_s: 30 } });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.appliedThinking, '中');
+  assert.match(res.result.thinkingWarning || '', /did not stick/);
+  const stored = await router.handle({ tool: 'get_answer', params: { task_id: res.result.task_id } });
+  assert.equal(stored.result.appliedThinking, '中');
+  assert.match(stored.result.thinkingWarning || '', /did not stick/);
+});
+
 test('ask_gemini failure names the adapter version in the error', async () => {
   const router = makeGeminiRouter({
     sendMessageImpl: async (tabId, msg) => {
