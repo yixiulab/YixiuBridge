@@ -171,3 +171,42 @@ test('ask with a model closes a menu left open by the selection and still sends'
   assert.equal(page.picker.textContent, 'Hydrogen 高');
   assert.equal(page.doc.querySelector('[role="menu"]'), null, 'menu must be closed after the ask');
 });
+
+// ---------- send retries (v0.4.13, teacher-testpc-001) ----------
+// Background: on the real page the send button ignored a plain click
+// AND Enter, the prompt sat in the box, and the bridge reported the
+// failure while the answer was already in the tab. The adapter now
+// tries more send methods before failing: plain click, Enter, CDP
+// trusted click, full pointer sequence — then recovery.
+
+test('plain click ignored, full pointer sequence sends', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, sendNeedsPointerSequence: true });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await adapter.ask('What is 2+2?');
+  assert.equal(res.ok, true, 'expected the pointer sequence to send, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, '4 is the answer.');
+});
+
+test('CDP trusted click sends when synthetic clicks are ignored', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, sendStartsOnTrustedClick: true });
+  const adapter = Adapter.createAdapter(page.doc, {
+    win: page.win,
+    ...FAST,
+    timeoutMs: 5000,
+    requestTrustedSendClick: async () => {
+      page.send.__trustedClick();
+      return { ok: true };
+    },
+  });
+  const res = await adapter.ask('What is 2+2?');
+  assert.equal(res.ok, true, 'expected the trusted click to send, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, '4 is the answer.');
+});
+
+test('send attempts focus the prompt box before clicking', async () => {
+  const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, true);
+  assert.equal(page.box._focused, true, 'the box must hold focus when the send is attempted');
+});
