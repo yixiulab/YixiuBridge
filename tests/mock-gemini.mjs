@@ -27,7 +27,7 @@ const MOCK_MODELS = [
 ];
 const MOCK_LEVELS = ['高', '中', '低'];
 
-export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
+export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
   const win = new FakeWindow();
 
@@ -87,14 +87,22 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
         }
         closeMenu();
       };
+      // levelClickDead: mouse clicks on the level items do nothing
+      // (simulates the real page, verify15/16) — only keyboard Enter /
+      // Space activates the level (v0.4.9).
+      const applyByKey = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') applyLevel();
+      };
       if (levelRadioInside) {
         const radio = new FakeElement('span', { role: 'radio' });
         radio.textContent = lv;
-        radio.addEventListener('click', applyLevel);
+        radio.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
+        radio.addEventListener('keydown', applyByKey);
         item.appendChild(radio);
       } else {
         item.textContent = lv;
-        item.addEventListener('click', applyLevel);
+        item.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
+        item.addEventListener('keydown', applyByKey);
       }
       submenu.appendChild(item);
     }
