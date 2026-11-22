@@ -859,7 +859,7 @@ export async function acquireLock(dataDir, log = logLine) {
 // to await loadConfig, and it invented timer/lock variable names that
 // do not exist in runRunner.)
 
-export const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+export const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes (was 1 hour — a test cycle then waited an hour for the auto-install; 2 min keeps the runner's idle check cheap and lets a new stable version land on its own within minutes)
 export const RUNNER_SELF_RESTART_FILES = new Set([
   'host/muse-runner.mjs',
   'kernel/shared/constants.js',
