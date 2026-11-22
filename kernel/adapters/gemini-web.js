@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.10';
+  var ADAPTER_VERSION = '0.4.11';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -342,6 +342,12 @@
     var stableMs = opts.stableMs || DEFAULTS.stableMs;
     var sendCheckMs = (opts.sendCheckMs !== undefined) ? opts.sendCheckMs : DEFAULTS.sendCheckMs;
     var win = opts.win || (typeof window !== 'undefined' ? window : globalThis);
+    // requestTrustedClick(levelText) -> Promise<{ok} | {ok:false, error}>.
+    // Injected by the content script (v0.4.11): asks the background
+    // service worker for a real CDP trusted click on a thinking-level
+    // item. Absent in tests and when the background cannot do CDP — the
+    // adapter then falls back to the synthetic chain.
+    var requestTrustedClick = opts.requestTrustedClick || null;
 
     function findPromptBox() {
       return queryFirst(doc, SELECTORS.PROMPT_BOX);
@@ -1174,6 +1180,32 @@
       } catch (e) { return false; }
     }
 
+    // Measure a thinking-level item's viewport centre (CSS pixels) for
+    // a CDP trusted click. The submenu must already be open — this only
+    // reads, it never opens or closes anything. Returns { ok, x, y } or
+    // { ok:false, error }. The background calls this AFTER attaching the
+    // debugger, so the coordinates already account for the debug
+    // infobar's viewport shift (teacher's answer, 2026-11-22).
+    function measureThinkingLevelItem(want) {
+      var items = readModelMenuItems();
+      for (var i = 0; i < items.length; i++) {
+        var m = parseModelItem(items[i]);
+        if (m.codename) continue;
+        if (MODEL_LABELS.indexOf(m.label) !== -1) continue;
+        var t = textOf(items[i]).trim();
+        if (t.indexOf('思考') !== -1) continue;
+        if (t === want || t.indexOf(want) !== -1) {
+          var el = items[i];
+          if (!el || typeof el.getBoundingClientRect !== 'function') {
+            return { ok: false, error: 'thinking level item has no getBoundingClientRect' };
+          }
+          var r = el.getBoundingClientRect();
+          return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
+        }
+      }
+      return { ok: false, error: 'thinking level "' + want + '" not found in the open submenu' };
+    }
+
     // Open the model menu, open the 思考等级 submenu, click the given
     // level item. Returns { ok: true } or an error object (invalid-level
     // when the level is not in the menu, apply-failed otherwise).
@@ -1213,6 +1245,20 @@
         return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
       var target = findLevelClickTarget(match, want);
+      // Trusted (CDP) click first — the teacher's answer (2026-11-22):
+      // synthetic events fail on these items (ISOLATED-world instanceof
+      // checks / isTrusted), but a CDP Input.dispatchMouseEvent is a
+      // real trusted click. The background attaches the debugger,
+      // re-measures the item (the debug infobar shifts the viewport),
+      // clicks, and detaches. Falls back to the synthetic chain when no
+      // background messenger is injected (tests) or the trusted click
+      // fails (e.g. DevTools open on the tab).
+      if (requestTrustedClick) {
+        try {
+          var tc = await requestTrustedClick(want);
+          if (tc && tc.ok) return { ok: true };
+        } catch (e) { /* fall through to the synthetic chain */ }
+      }
       // Activation alternates by attempt: 1st and 3rd walk the menu with
       // the arrow keys (the user's method — the submenu defaults to the
       // first item, 高 is two downs away), 2nd focuses the item and
@@ -1494,6 +1540,7 @@
       listModels: listModels,
       selectModel: selectModel,
       selectThinkingLevel: selectThinkingLevel,
+      measureThinkingLevelItem: measureThinkingLevelItem,
       waitForCompletion: waitForCompletion,
       ask: ask,
     };
