@@ -1,0 +1,15 @@
+{
+  "id": "task-20261122-bridge-045-verify14",
+  "answer": "OK",
+  "model": "gemini-web",
+  "elapsed_ms": 15431,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "applied_thinking": "低",
+  "answered_model": "Neon",
+  "thinking_warning": "gemini thinking level did not stick — selected level is \"低\" after choosing \"高\"",
+  "adapter_version": "0.4.5",
+  "bridge_version": "0.4.5",
+  "bridge_task_id": "task_mwrkgwj3uxs1zp",
+  "answered_at": "2026-11-22T08:20:28.029Z"
+}
