@@ -196,3 +196,7 @@ verify15 证明重试也不管用：0.4.6 试了 3 次，`applied_thinking` 还�
 ## 思考等级改点子元素（v0.4.8）
 
 verify16 证明真人式点击也不管用：0.4.7 试了 3 次全序列，`applied_thinking` 还是 低。根因换了一个：可选项（radio）藏在菜单项里面，点容器根本够不着它——事件只往上冒、不往下传，容器上的点击永远传不到里面的 radio 上。修法：新增 `findLevelClickTarget`，按顺序找：菜单项里面的 `input[type="radio"]` / `[role="radio"]` / `mat-radio-button`，再找最深的含等级文字的元素（常在 radio 的 label 里，点它能激活 radio），最后才点容器本身。Mock 加 `levelRadioInside`（radio 在菜单项里面、只有点 radio 才生效）模拟真机；新增测试：radio 在里面时照常问答且 `appliedThinking` 为 高、无警告。207 测试全过。注意：如果点子元素后还是 低，下一步是键盘操作（focus 后按 Enter/Space）或读页面真实结构再定，不要再换点击目标。
+
+## 思考等级改键盘选（v0.4.9）
+
+verify17（0.4.8）回 OK，但思考等级这一步根本没走到：警告是“model menu did not open”，`applied_thinking` 为 null——菜单那次没打开，是偶发的，所以 0.4.8 的点子元素还没在真机上真正试过。用户亲眼看到的关键现象是：思考等级子菜单弹得出、就是选不上——点鼠标这条路在真机上走不通。修法：新增 `activateLevelByKeyboard`，聚焦目标后按 Enter（菜单项）或空格（radio），这是和鼠标点击完全不同的输入路径，Angular Material 菜单认键盘；重试 3 次里第 1、3 次用键盘，第 2 次保留鼠标点击当后备。Mock 加 `levelClickDead`（鼠标点击完全无效、只有键盘能选）模拟真机；新增测试：点击无效时键盘照常选上且 `appliedThinking` 为 高、无警告。208 测试全过。注意：如果键盘也不管用，下一步是用浏览器调试接口发真人点击（CDP Input.dispatchMouseEvent，带真实坐标、isTrusted 为真），不要再换合成事件。
