@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.12';
+  var VERSION = '0.4.13';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -95,12 +95,14 @@ importScripts(
       return false;
     }
     if (msg && msg.type === 'yixiubridge-trusted-click') {
-      // Content script wants a real (CDP) click on a thinking-level
-      // item (v0.4.12). The adapter already opened the submenu. Attach
-      // the debugger FIRST (the infobar shifts the viewport), wait for
-      // the layout to settle, then ask the content script to measure the
-      // item's centre, click it via CDP, and detach. Async — keep the
-      // channel open (return true).
+      // Content script wants a real (CDP) click: on a thinking-level
+      // item (v0.4.12, msg.levelText) or on the SEND button (v0.4.13,
+      // msg.target === 'send'). The adapter already opened the submenu
+      // (level) or found the button (send). Attach the debugger FIRST
+      // (the infobar shifts the viewport), wait for the layout to
+      // settle, then ask the content script to measure the target's
+      // centre, click it via CDP, and detach. Async — keep the channel
+      // open (return true).
       var tabId = sender && sender.tab && sender.tab.id;
       if (!tabId) { sendResponse({ ok: false, error: 'trusted-click: no tab id' }); return false; }
       if (!debuggerMgr) { sendResponse({ ok: false, error: 'trusted-click: debugger manager not ready' }); return false; }
@@ -110,8 +112,12 @@ importScripts(
           attached = await debuggerMgr.attach(tabId);
           if (!attached) { sendResponse({ ok: false, error: 'debugger attach failed — is DevTools open on this tab?' }); return; }
           await new Promise(function (r) { setTimeout(r, 150); });
-          var measured = await chrome.tabs.sendMessage(tabId, { from: 'yixiubridge-sw', type: 'measure-thinking-item', levelText: msg.levelText });
-          if (!measured || !measured.ok) { sendResponse({ ok: false, error: (measured && measured.error) || 'measure-thinking-item failed' }); return; }
+          var isSend = msg.target === 'send';
+          var measureMsg = isSend
+            ? { from: 'yixiubridge-sw', type: 'measure-send-button' }
+            : { from: 'yixiubridge-sw', type: 'measure-thinking-item', levelText: msg.levelText };
+          var measured = await chrome.tabs.sendMessage(tabId, measureMsg);
+          if (!measured || !measured.ok) { sendResponse({ ok: false, error: (measured && measured.error) || (isSend ? 'measure-send-button failed' : 'measure-thinking-item failed') }); return; }
           await debuggerMgr.trustedClick(tabId, measured.x, measured.y);
           sendResponse({ ok: true });
         } catch (e) {
