@@ -542,5 +542,20 @@
     "elapsed_ms": null,
     "error": null,
     "at": "2026-11-22T20:21:06.959Z"
+  },
+  {
+    "id": "task-20261122-bridge-042-verify32",
+    "status": "done",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": null,
+    "answered_model": "gemini-web",
+    "adapter_version": "0.4.16",
+    "bridge_version": "0.4.16",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": null,
+    "at": "2026-11-22T20:59:08.362Z"
   }
 ]
