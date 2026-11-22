@@ -105,12 +105,13 @@ test('ask with an unknown model fails fast and lists the available models', asyn
   assert.equal(page.doc.querySelector('.model-response-text'), null, 'no answer must be started');
 });
 
-test('ask with a thinking level switches the level and verifies the button text ("Neon 低")', async () => {
+test('ask with a thinking level switches the level and reports the applied level (v0.4.4)', async () => {
   const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10 });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   const res = await adapter.ask('hello', { thinking: '低' });
   assert.equal(res.ok, true);
   assert.equal(res.answer, 'ok');
+  assert.equal(res.appliedThinking, '低');
   assert.equal(page.picker.textContent, 'Neon 低');
 });
 
@@ -121,7 +122,8 @@ test('ask with a thinking level that does not stick warns and still answers (v0.
   assert.equal(res.ok, true, 'a level that will not stick must not fail the ask');
   assert.equal(res.answer, 'ok');
   assert.match(res.thinkingWarning || '', /did not stick/);
-  assert.match(res.thinkingWarning || '', /Neon 中/);
+  assert.match(res.thinkingWarning || '', /selected level is "中"/);
+  assert.equal(res.appliedThinking, '中');
   assert.equal(page.picker.textContent, 'Neon 中');
 });
 
@@ -139,6 +141,7 @@ test('ask with model + thinking level applies both', async () => {
   const res = await adapter.ask('hello', { model: 'Hydrogen', thinking: '中' });
   assert.equal(res.ok, true);
   assert.equal(res.model, 'Hydrogen');
+  assert.equal(res.appliedThinking, '中');
   assert.equal(page.picker.textContent, 'Hydrogen 中');
 });
 
