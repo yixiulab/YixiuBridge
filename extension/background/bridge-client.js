@@ -20,6 +20,14 @@
     this._abort = null;
     this._reconnectDelay = 1000;
     this._stopped = false;
+    // Generation counter (v0.4.16): every connect() bumps it, and a loop
+    // whose generation no longer matches exits at its next checkpoint.
+    // Without this, stop() + connect() while the old loop is asleep in
+    // its reconnect delay leaves TWO loops fetching the SSE stream — the
+    // old one wakes up after connect() cleared _stopped and carries on
+    // as if nothing happened. The service worker calls stop()+connect()
+    // when it detects a stale stream, so the guard must be airtight.
+    this._generation = 0;
   }
 
   BridgeClient.prototype.status = function () {
@@ -28,14 +36,15 @@
 
   BridgeClient.prototype.connect = async function () {
     this._stopped = false;
-    while (!this._stopped) {
+    var gen = ++this._generation;
+    while (!this._stopped && this._generation === gen) {
       try {
         await this._runStream();
       } catch (e) {
         this.connected = false;
         this.onStatus(this.status());
       }
-      if (this._stopped) break;
+      if (this._stopped || this._generation !== gen) break;
       await new Promise(function (r) { setTimeout(r, this._reconnectDelay); }.bind(this));
       this._reconnectDelay = Math.min(this._reconnectDelay * 2, C.EXTENSION_RECONNECT_MAX_MS);
     }
@@ -43,6 +52,7 @@
 
   BridgeClient.prototype.stop = function () {
     this._stopped = true;
+    this.connected = false;
     if (this._abort) { try { this._abort.abort(); } catch (e) { /* ignore */ } }
   };
 
