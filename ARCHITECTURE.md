@@ -28,7 +28,7 @@
 
 ## 工具目录是唯一的事实来源
 
-`kernel/control/host/tools.js` 定义全部 7 个 MCP 工具（`ping`、`tabs_context`、`navigate`、`read_page`、`list_models`、`ask_gemini`、`get_answer`）。MCP 服务器用它生成 `tools/list`，插件后台用它校验 `tool_call`。加工具只改这一个文件，两边自动同步。
+`kernel/control/host/tools.js` 定义全部 8 个 MCP 工具（`ping`、`tabs_context`、`navigate`、`read_page`、`list_models`、`ask_gemini`、`get_answer`、`recover_last_answer`）。MCP 服务器用它生成 `tools/list`，插件后台用它校验 `tool_call`。加工具只改这一个文件，两边自动同步。
 
 ## 一次 ask_gemini 的完整链路
 
@@ -218,3 +218,13 @@ CDP 真实点击也粘不住（verify23：0.4.11 回 OK 但 `applied_thinking` �
 根因（这才是 0.4.4 以来全军覆没的真正原因）：等级匹配用子串（`t.indexOf(want) !== -1`）。“高”是“高效”的子串——低的描述是“快速、高效”，找 高 时先匹配到 低，于是每次都点在已选中的 低 上，CDP 点的也是 低（measure 和 click 两处都用子串）。Mock 从没捉住它，因为 mock 的等级项只有名字、没有描述。
 
 修法：新增 `levelLabelOf(el)`——把项文字按空白切词，取首个恰好是 低/中/高 的词（“高效”不是“高”，不会误 match；打勾项前缀的“已选中”也不是等级名）；measure、click、读取选中态三处全改精确匹配；`findLevelClickTarget` 的子元素查找也改精确匹配。Mock 补上真实描述（等级项文字改成“等级 + 描述”）、角色改成 `menuitemradio`；新增回归测试：要 高 时断言 `appliedThinking` 为 高。已证实：旧子串逻辑下 model-select 有 5 个测试失败（新 mock 捉住了它），改精确匹配后 212 测试全过。
+
+## 答案取不回时先恢复，不要写失败（v0.4.13）
+
+2026-11-22 14:08 用户下令先解决的问题：老师明明在 Gemini 标签页里回答了，桥却报失败、Muse 取不回答案。teacher-testpc-002（13:51）和 003（14:06）都报 `This operation was aborted`，001（13:38）报 `send did not register`；用户 14:00 的截图证明完整回答就在页面里，桥报的失败是假的——和 2026-11-21 番茄钟 -007 同模式。
+
+根因有两条。第一条在 runner：`createBridgeCaller.ask()` 的 fetch abort 是 `min((timeoutS + 90)s, 300s)`——300 秒的任务 5 分钟就 abort 掉到桥 `/call` 的请求，报错是 DOM AbortError 的标准文案 `This operation was aborted`，此时还没拿到 `task_id`，没法轮询，答案在标签页里也被丢掉；桥自己的定时器本会在 ~300 秒返回 pending + task_id，但 runner 的 abort 先一步把它掐断了。第二条在适配器：发送只有 click + Enter 各一次就判死刑，真实页面两者都被忽略（teacher-001：提示还留在输入框里）。
+
+修法（四层）：(1) abort 对齐总预算——`abortMs` 改成 `overallCapMs`（15 分钟），fetch 不再在桥回 pending 之前先断；桥的定时器 ~300 秒回 pending + task_id 后 `pollTask` 接着轮询，abort 只在桥本身挂住时才触发兜底。(2) 新增 `recover_last_answer` 工具（第 8 个 MCP 工具）：桥端不占任务锁（60 秒上限），路由器用 `_findGeminiTab` 直接找标签页、**绝不重载**（重载会毁掉要找回的答案），内容脚本调适配器 `recoverLastAnswer(prompt)` 读当前页最后一条完整回答，不重新发问。适配器的守卫：有本轮 baseline 时只认本轮新出现/变化的回答；没有 baseline 时要求最新一条 user-query 必须带有本次 prompt；回答还在流式时拒绝；三者都过才返回。`recovered` 字段沿适配器 → 路由器存档/返回 → 桥 → runner → done 文件全程直通（0.4.5 的教训：字段必须沿链路数一遍）。runner 在 `ask` 失败后先调一次恢复接口，取到就写 done（`recovered: true`），取不到才写 failed。(3) 发送改多路重试：先聚焦输入框、确认没有菜单遮挡（菜单还开着就先关掉），再依次试普通点击、回车、CDP 真实点击（`requestTrustedSendClick`，复用 0.4.11 的 `Input.dispatchMouseEvent` 路径，内容脚本 `measure-send-button` 量发送按钮中心）、完整指针序列（`clickElement`），仍不成功才轮询恢复 1 秒再判失败。(4) `pollTask` 改先读状态再看 deadline：卡在 deadline 整点答完的任务也不再被丢掉。
+
+Mock 同步：`FakeWindow` 补 `MouseEvent`/`PointerEvent`（`clickElement` 的指针序列在测试里真正走通）；mock 发送按钮新增 `sendNeedsPointerSequence`（裸点击被忽略、只有指针序列能发）、`sendStartsOnTrustedClick`（只有 CDP 真实点击能发）、`sendStartsLateMs`（点击后延迟才开始流式，发送检查全部误判、只能靠恢复）；`startStreaming` 在默认结构里也建 user-query turn（和真实页面一致，恢复才能凭它证明 prompt 已发出）。新增 `tests/recover.test.mjs`（适配器恢复的守卫 + 路由器恢复不重载标签页），runner 测试补 abort 对齐与三路恢复（abort 后取到 → done、send 未注册后取到 → done、取不到 → failed），send-button 测试补指针序列与 CDP 真实点击发送。
