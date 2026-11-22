@@ -41,6 +41,21 @@ test('list_models returns all 4 menu entries with label, codename, selected and 
   assert.equal(byCode.Carbon.locked, true);
 });
 
+test('openModelMenu waits for a late-appearing picker button instead of failing at once (v0.4.15)', async () => {
+  // teacher-003 (2026-11-22): the picker button was not found on the
+  // first look even though the conversation was live — the page can be
+  // mid-render or the tab just (re)loaded. The menu opener now polls
+  // for the button for up to 15s before declaring the UI changed.
+  const page = createMockGeminiPage();
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST });
+  const parent = page.picker.parent;
+  page.picker.remove();
+  setTimeout(() => parent.appendChild(page.picker), 300);
+  const res = await adapter.listModels();
+  assert.equal(res.ok, true, 'expected the retry to find the late picker, got: ' + JSON.stringify(res));
+  assert.equal(res.models.length, 4);
+});
+
 test('list_models closes the menu afterwards and does not change the selection', async () => {
   const page = createMockGeminiPage();
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST });
