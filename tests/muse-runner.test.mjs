@@ -105,12 +105,15 @@ function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = nu
   };
   // recover: undefined = no recoverLastAnswer at all (old fake bridges);
   // a string = recovery returns that answer; null = recovery finds
-  // nothing. (v0.4.13)
+  // nothing; { error } = recovery misses with a reason; an array =
+  // one entry per call, in order (v0.4.14: the poll loop).
   if (recover !== undefined) {
     bridge.recoverLastAnswer = async (prompt) => {
       calls.push({ op: 'recover', prompt });
-      if (recover === null) return null;
-      return { answer: recover, model: 'Neon', elapsedMs: 500, adapterVersion: '0.4.13', bridgeTaskId: null, recovered: true };
+      const next = Array.isArray(recover) ? recover.shift() : recover;
+      if (next === null || next === undefined) return null;
+      if (typeof next === 'object' && next.error) return { error: next.error };
+      return { answer: next, model: 'Neon', elapsedMs: 500, adapterVersion: '0.4.14', bridgeTaskId: null, recovered: true };
     };
   }
   return bridge;
@@ -564,11 +567,54 @@ test('processOneTask writes failed only when recovery finds nothing', async () =
     failWith: 'This operation was aborted',
     recover: null,
   });
-  const res = await processOneTask({ github, bridge, log: () => {} });
+  const res = await processOneTask({ github, bridge, log: () => {}, recoverBudgetMs: 30, recoverPollMs: 10 });
   assert.equal(res.status, 'failed');
   assert.match(res.error, /aborted/);
   assert.equal(gh.files.has('tasks/done/t1.answer.json'), false);
   assert.ok(readRepo(gh.files, 'tasks/failed/t1.error.json'));
+});
+
+// ---------- recovery polling (v0.4.14) ----------
+// Background: teacher-testpc-004 (2026-11-22 18:15) failed with "no
+// response appeared" while Gemini was still thinking, and the single
+// recovery read ran while the answer was still streaming — so it
+// refused, the failed file was written, and the answer that arrived
+// minutes later was never collected. Recovery now polls for up to 5
+// minutes, and a miss records its reason in the failed file.
+
+test('processOneTask polls recovery until the late answer appears', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'gemini no response appeared',
+    recover: [null, { error: 'recover: answer still streaming' }, 'the late answer'],
+  });
+  const res = await processOneTask({ github, bridge, log: () => {}, recoverBudgetMs: 500, recoverPollMs: 10 });
+  assert.equal(res.status, 'done');
+  assert.equal(res.recovered, true);
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').answer, 'the late answer');
+  assert.equal(gh.files.has('tasks/failed/t1.error.json'), false, 'no failed file may be written when a late recovery succeeds');
+  assert.equal(bridge.calls.filter((c) => c.op === 'recover').length, 3, 'recovery must keep polling until the answer appears');
+});
+
+test('processOneTask failed file records the recovery reason', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'gemini no response appeared',
+    recover: { error: 'recover: answer still streaming' },
+  });
+  const res = await processOneTask({ github, bridge, log: () => {}, recoverBudgetMs: 50, recoverPollMs: 10 });
+  assert.equal(res.status, 'failed');
+  const failed = readRepo(gh.files, 'tasks/failed/t1.error.json');
+  assert.ok(failed, 'a failed file must be written');
+  assert.match(failed.recover_error, /still streaming/, 'the failed file must say WHY recovery missed, not force a guess');
+  assert.ok(failed.recover_attempts >= 1, 'the failed file must count the recovery attempts');
+  assert.equal(res.recoverError, 'recover: answer still streaming');
 });
 
 test('adapterVersionFromError extracts the version tag, null when absent', () => {
