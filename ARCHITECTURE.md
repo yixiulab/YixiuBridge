@@ -277,3 +277,17 @@ Mock 同步：`FakeWindow` 补 `MouseEvent`/`PointerEvent`（`clickElement` 的�
 也不回 1 小时：0.4.3 时 1 小时吃过亏（检查刚跑完没更新、计时重置，又等一小时，最后还是用户双击 .bat）。
 30 分钟是中间值：新稳定版最多半小时自己装上，一天只查 48 次；检查本身很轻（空闲时才查，两次小请求，
 GitHub 限额一小时 5000 次，30 次/小时连零头都不到）。条件：0.4.15 真机验证通过后再改。
+
+## v0.4.17 — 验证修复 + 灵活等待 + 发送检测修复（2026-11-22，用户定直接做）
+
+用户 2026-11-22 22:35 定：直接做 0.4.17，做完再继续下面的。背景是 verify32/33/34 三轮测试（0.4.16 真机）：verify32 问个 OK 等满 15 分钟、取回的是 teacher-005 的旧答案（unmatched 恢复误报）；verify33 取回的是新鲜 OK、1 分 47 秒，但走的恢复路径——ask 报“发送按钮找不到，Enter 兜底也没把提示发出去”，实际提示已发出；verify34 干净正常路径、26 秒取回 OK，发送误报没重现（偶发）。用户在 verify33 后亲眼看到页面一直转、刷新后 OK 已出现，并定：先测试、不先改，收到答案后再看问题怎么解决；verify34 后用户再次明确思考等级不用管了，实际就是高、亲眼看到好几次都是高。
+
+1. **思考等级验证修复**：根因是验证时机，不是选择。点完等级立刻读 aria-checked，读到的是点击前的旧状态（低）——菜单关闭、Angular 重渲染还没发生。`selectThinkingLevel` 现在点完先 `waitForMenuClosed(5000)`（每 200 毫秒查一次，直到菜单里没有可见项），再 `readSelectedThinkingLevel`；`readSelectedThinkingLevel` 入口也先确保菜单已关（`closeModelMenu` + `waitForMenuClosed(2000)`），再重开、读新鲜节点。预算只在菜单真卡住时才花：正常关闭约 300 毫秒，等待约 400 毫秒就返回。0.4.17 的验证只是让汇报读数准确——等级本身不是问题（用户已确认实际就是高）。`waitForMenuClosed` 导出给测试用。
+
+2. **灵活等待**：`waitForCompletion` 不再到固定截止时间就掐断。新增 `activeGraceMs`（默认 30 秒）与 `hardCapMs`（默认 14 分钟，从 ask 开始算，在 runner 15 分钟总预算内）。循环条件改成：没到截止时间，或（没到硬上限 且 最近一次活动在 grace 内）。活动 = 文本在变、停止按钮在、思考圆点在（新增 `isThinking()`：`.thinking-dots-animation` / `[class*="thinking-dots"]` / `.pending-response` / `pending-response`）。什么活动都没有的页面仍按原样在截止时间失败（“no response appeared” 不变）。超时错误写明是硬上限还是活动停了（`hard cap reached` / 延长了多久）。
+
+3. **发送检测修复**：`confirmSent` 增加第四支判断——提问作为一条**新** user-query 出现在对话里就是已发送（`getUserQueryTexts()` 数量比发送前多，且最新一条匹配提示）。页面提交瞬间就渲染提问，输入框清空与流式开始都在后面；verify33 就是卡在这里：Enter 已发出，旧的三支判断（流式/清空/新回答）全没赶上，于是误报发送失败。数量比较防重复提问误判（上一轮同样的提问只凭文本也会匹配）。`queriesBefore` 在填提示框之前取。
+
+测试：mock 新增 `menuCloseDelayMs`（菜单关闭动画：点击后延迟移除，关闭进行中点 picker 被吞掉——真实页面的形状）与 `responseDelayMs`（提问先入对话、思考圆点先出，回答延迟才开始——真实页面的思考阶段）；`startStreaming` 拆成建提问轮 + 开始流式，并加 `streamingStarted` 守卫防重复触发（流式结束复位）。新增 9 个测试（验证 2 个：`waitForMenuClosed` 单元、慢关菜单下第一次就读出 高；灵活等待 4 个：文本在变时延长取回、硬上限报错点名、思考阶段无文本时延长取回、无活动仍按时失败；发送检测 1 个：无发送按钮 + Enter + 延迟回答时经提问轮确认发送；另 3 个是旧超时测试按新行为改写：流式标志残留时延长后取回、文本持续变化时延长取回、永不结束的流式在硬上限结束并带 partial）。另改 1 个旧测试（recover.test.mjs：ask 本身不再超时，改用 400 毫秒硬上限让 ask 失败、恢复路径照常验证）。全套 **256/256**。验证测试用回退法证实能捉住 bug：把 `selectThinkingLevel` 的等菜单关改回 sleep(300)、把 `readSelectedThinkingLevel` 的确保关闭去掉，D2 测试失败（高 被点了 2 次才粘住）；恢复后通过。新增断言 `page.levelClickCounts['高'] === 1`——重试循环会掩盖第一次读旧的毛病（后一次在关闭后读新鲜的），点 1 次才是第一次就读对的证明；真实页面上旧读法 3 次重试全读 低（verify14/15/16），比 mock 更粘。
+
+未在真机上验（verified_by_muse 保持 false）：三处修复都只在 mock 上证实形状；真实 Gemini 的菜单关闭动画时长、思考圆点形态、Enter 发送后提问轮出现的时间都以真机探针为准。下一版探针建议：短问 OK（看发送检测与验证读数）+ 长回答（看灵活等待与完成检测）。
