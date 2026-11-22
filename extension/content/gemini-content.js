@@ -17,7 +17,7 @@
   // tab opened earlier still runs the OLD content script (Chrome does not
   // re-inject on extension reload), so the router reloads the tab once
   // when this version is stale or missing.
-  var CONTENT_VERSION = '0.4.14';
+  var CONTENT_VERSION = '0.4.15';
 
   function getAdapter() {
     if (adapter) return adapter;
@@ -173,7 +173,11 @@
       try {
         var rec = adRec.recoverLastAnswer((msg.params && msg.params.prompt) || '');
         if (rec && rec.ok) {
-          sendResponse({ ok: true, result: { answer: rec.answer, model: 'gemini-web', adapter_version: getAdapterVersion(), recovered: true } });
+          // v0.4.15: pass unmatched through — the answer is the latest
+          // in the tab but was not verified against this prompt (the
+          // prompt never left the box). The runner surfaces it as
+          // recovered_unmatched so the reader knows.
+          sendResponse({ ok: true, result: { answer: rec.answer, model: 'gemini-web', adapter_version: getAdapterVersion(), recovered: true, unmatched: !!rec.unmatched } });
         } else {
           sendResponse({ ok: false, error: (rec && rec.error) || 'recover_last_answer: no answer found in the current Gemini tab', adapter_version: getAdapterVersion() });
         }
