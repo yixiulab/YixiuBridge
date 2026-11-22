@@ -10,7 +10,9 @@ import vm from 'node:vm';
 
 function loadDebuggerManager(fakeChrome) {
   const src = fs.readFileSync(new URL('../extension/background/debugger.js', import.meta.url), 'utf8');
-  const ctx = vm.createContext({ chrome: fakeChrome });
+  // trustedClick (v0.4.11) sleeps between the CDP mouse events; the vm
+  // context has no timers by default, so pass Node's setTimeout in.
+  const ctx = vm.createContext({ chrome: fakeChrome, setTimeout });
   vm.runInContext(src, ctx);
   return ctx.YixiuBridgeDebuggerManager;
 }
@@ -127,4 +129,36 @@ test('snapshot uses evaluate, so it also detaches', async () => {
   assert.equal(snap.title, 't');
   assert.equal(mgr.isAttached(3), false);
   assert.ok(fake.calls.some((c) => c[0] === 'detach' && c[1] === 3));
+});
+
+test('trustedClick sends the mouseMoved -> mousePressed -> mouseReleased sequence (v0.4.11)', async () => {
+  // The teacher's answer (2026-11-22): a CDP trusted click is a real
+  // (isTrusted true) click — the only input the Gemini thinking-level
+  // submenu items accept. It assumes the tab is already attached.
+  const commands = [];
+  const fake = makeFakeChrome({
+    sendCommandImpl: async (target, method, params) => {
+      commands.push({ method, params });
+      return {};
+    },
+  });
+  const Manager = loadDebuggerManager(fake);
+  const mgr = new Manager();
+  await mgr.attach(7);
+  await mgr.trustedClick(7, 160, 218);
+  assert.equal(commands.length, 3);
+  assert.equal(commands[0].method, 'Input.dispatchMouseEvent');
+  assert.equal(commands[0].params.type, 'mouseMoved');
+  assert.equal(commands[0].params.x, 160);
+  assert.equal(commands[0].params.y, 218);
+  assert.equal(commands[0].params.button, 'none');
+  assert.equal(commands[1].params.type, 'mousePressed');
+  assert.equal(commands[1].params.button, 'left');
+  assert.equal(commands[1].params.buttons, 1);
+  assert.equal(commands[1].params.clickCount, 1);
+  assert.equal(commands[2].params.type, 'mouseReleased');
+  assert.equal(commands[2].params.button, 'left');
+  assert.equal(commands[2].params.buttons, 0);
+  assert.equal(commands[2].params.clickCount, 1);
+  assert.equal(mgr.isAttached(7), true, 'trustedClick does not detach — the caller detaches');
 });
