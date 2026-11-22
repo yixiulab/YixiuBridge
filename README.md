@@ -4,6 +4,12 @@
 
 > English summary: a universal browser bridge. Any MCP-capable AI drives your real, already-logged-in Chrome and asks web models (Gemini web first), with answers returned to the local agent. Local-only, zero npm dependencies.
 
+## 当前稳定版：v0.4.15（2026-11-22）
+
+汇总见 [STABLE.md](STABLE.md)：装哪个版本、哪些已在真机上验证过、哪些已知还没修好。
+下载：本页右上角 **Code → Download ZIP**，或右边 **Releases** 栏的 **v0.4.15**（带更新说明的正式包）。
+安装：解压到纯英文路径后双击 `一键启动.bat`。版本记录见 [builds/builds.json](builds/builds.json)。
+
 ## 它解决什么问题
 
 本地便宜模型额度大、但智商不够；网页版旗舰模型聪明、额度免费、但看不到你的本地文件。YixiuBridge 是中间的桥：
