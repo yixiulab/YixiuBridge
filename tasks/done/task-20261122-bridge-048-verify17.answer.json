@@ -1,0 +1,15 @@
+{
+  "id": "task-20261122-bridge-048-verify17",
+  "answer": "OK",
+  "model": "gemini-web",
+  "elapsed_ms": 13770,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "applied_thinking": null,
+  "answered_model": "Neon",
+  "thinking_warning": "gemini model menu did not open — the picker button may be wrong, or the UI changed",
+  "adapter_version": "0.4.8",
+  "bridge_version": "0.4.8",
+  "bridge_task_id": "task_mwrmcdd43vfsq1",
+  "answered_at": "2026-11-22T09:12:54.137Z"
+}
