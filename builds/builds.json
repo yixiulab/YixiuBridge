@@ -118,6 +118,13 @@
       "channel": "stable",
       "verified_by_muse": false,
       "changelog": "用户下令：任务必须有看得见的进度、老师的回答必须取回来。(1) 进度可见：runner 在 tasks/status/<id>.json 里按阶段写状态（claimed 已领取 → sending 发送中 → waiting 等 Gemini 回答 → retrieving 取答案 → done/failed），每阶段带时间戳，done/failed 文件也带完整 stages 历史；(2) 取答案可靠：模型选择按钮找不到时先等 15 秒再判失败（teacher-003 冷标签页/页面未渲染完就直接失败）；恢复时即使问题没发出去、匹配不上，也把标签页里最新一条完整回答取回来，标 recovered_unmatched: true（明说没对上号），不再丢掉用户已经能看到的答案。"
+    },
+    {
+      "version": "0.4.16",
+      "date": "2026-11-22",
+      "channel": "stable",
+      "verified_by_muse": false,
+      "changelog": "修 teacher-005（2026-11-22）暴露的全部效率问题：(1) 答案一完就取：适配器完成检测改成文本稳定 10 秒（stuckStreamingMs）即判完成，即使停止按钮还挂着（流式标志残留时以文本稳定为准）；恢复里同样用这个规则，不再一见流式标志就拒绝；判未完成时错误写明原因（流式标志/文本在变/稳定了多久）。(2) 插件自动重连：service worker 每分钟检查 SSE 心跳，45 秒没动静就重连（旧逻辑只在 connected=false 时才连，worker 挂起后 connected 恒 true，桥重启后 0 扩展 7 分钟没人管）；同刻检查 Gemini 标签页内容脚本，旧版/不答就重载（任务进行中、5 分钟内不重复）；桥客户端加 generation 守卫，重连不会留下两个 SSE 循环。(3) runner 自动开 Chrome 的每任务 3 次上限取消（任务还在等就一直试，3 分钟节流不变）。(4) 看门狗：新 scripts/watchdog.ps1（纯 ASCII）+ 注册逻辑，每 3 分钟查 runner 心跳（<3 分钟算活），过期就停掉卡死的 node runner、重起一个；注册幂等，由 runner 启动时和 update-and-start.ps1 顺带做（best-effort）。(5) 轮询写日志：问进轮询记一行、每分钟汇总一行，恢复每次尝试记一行（带适配器给的未完成原因），done 日志行标出流式标志残留。(6) 更新检查 2 分钟改 30 分钟（用户 2026-11-22 20:55 定的条件：0.4.15 真机验证通过后改——teacher-005 已证实 0.4.15 进度功能可用）。"
     }
   ]
 }
