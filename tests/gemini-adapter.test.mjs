@@ -133,3 +133,69 @@ test('click and Enter both failing returns a fast, clear error instead of timing
   assert.match(res.error, /still in the input box/);
   assert.ok(Date.now() - started < 5000, 'should fail fast, not wait out the 60s timeout');
 });
+
+// ---------- stuck streaming flag (v0.4.16, teacher-005) ----------
+// teacher-005 (2026-11-22): the answer text was complete and stable for
+// ~15 minutes while the stop button / thinking dots stayed up. The old
+// wait loop reset the stability clock on every poll while streaming, so
+// it burned the whole 240s timeout and the answer was only retrieved by
+// the 5-minute recovery poll. Now text stable for stuckStreamingMs
+// counts as done even with the flag still up.
+
+test('ask returns the answer when the text is done but the stop button stays up (stuck flag)', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, stopBtnStuck: true });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 100, timeoutMs: 5000 });
+  const started = Date.now();
+  const res = await adapter.ask('What is 2+2?');
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, '4 is the answer.');
+  assert.equal(res.completedVia, 'stable-while-streaming');
+  assert.equal(res.streamingFlagStuck, true);
+  // A completed answer must come back promptly — not after the timeout.
+  assert.ok(Date.now() - started < 2000, 'stuck-flag answer must return within ~2s, took ' + (Date.now() - started) + 'ms');
+  assert.equal(adapter.isStreaming(), true, 'the flag is still up — the text, not the flag, completed this ask');
+});
+
+test('ask still reports the fast path when the flag clears normally', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 100, timeoutMs: 5000 });
+  const res = await adapter.ask('What is 2+2?');
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, '4 is the answer.');
+  assert.equal(res.completedVia, 'stable');
+  assert.equal(res.streamingFlagStuck, undefined);
+});
+
+test('timeout error names the streaming flag when the text is stable but the flag is stuck', async () => {
+  const page = createMockGeminiPage({ chunks: ['partial…'], chunkMs: 10 });
+  // The mock's own stop button goes away when the chunks finish; add a
+  // second one that stays forever, so the flag is stuck while the text
+  // is stable — but the stuck threshold (1000ms) is longer than the
+  // 300ms timeout, so this ask must still time out, with a reason.
+  const forever = new FakeElement('button', { 'aria-label': 'Stop generating' });
+  page.doc.body.appendChild(forever);
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, stuckStreamingMs: 1000, sendCheckMs: 10, timeoutMs: 300 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not finish within timeout/);
+  assert.match(res.error, /still streaming/);
+  assert.match(res.error, /stuck-flag rule/);
+  assert.equal(res.partial, 'partial…');
+});
+
+test('timeout error says the text is still changing when it never stabilises', async () => {
+  // A chunk lands every 100ms, so the text is never stable for the
+  // 1000ms stuck threshold (or the 40ms stable window — the flag is up
+  // the whole time, so only the stuck rule applies). sendCheckMs is
+  // FAST so the wait starts on time; without it the 1000ms default
+  // send check would eat the whole 250ms timeout before the wait even
+  // starts, and the error would describe a deadline already passed
+  // instead of a text still changing.
+  const page = createMockGeminiPage({ chunks: ['a', 'b', 'c', 'd', 'e'], chunkMs: 100 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, stuckStreamingMs: 1000, sendCheckMs: 10, timeoutMs: 250 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not finish within timeout/);
+  assert.match(res.error, /text still changing/);
+  assert.equal(res.partial, 'ab');
+});
