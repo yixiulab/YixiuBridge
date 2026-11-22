@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-teacher-005",
-  "stage": "sending",
-  "detail": "model Neon, thinking 高",
-  "updated_at": "2026-11-22T20:05:46.266Z",
+  "stage": "waiting",
+  "detail": "task_mws9obmxnowhqj",
+  "updated_at": "2026-11-22T20:10:47.126Z",
   "stages": [
     {
       "stage": "claimed",
@@ -13,6 +13,11 @@
       "stage": "sending",
       "at": "2026-11-22T20:05:46.266Z",
       "detail": "model Neon, thinking 高"
+    },
+    {
+      "stage": "waiting",
+      "at": "2026-11-22T20:10:47.126Z",
+      "detail": "task_mws9obmxnowhqj"
     }
   ]
 }
