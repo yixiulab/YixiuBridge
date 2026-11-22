@@ -899,6 +899,33 @@ export function spawnDetachedSelf({ spawnImpl = spawn } = {}) {
   return child && child.pid ? child.pid : null;
 }
 
+// Re-copy kernel/ into extension/kernel/ after an online update (v0.4.3).
+// extension/kernel/ is a git-ignored build artifact, so the updater never
+// touches it — without this step the adapter on disk stays at the old
+// version after every update that changes it, and the extension's version
+// handshake fails (seen 2026-11-22: bridge 0.4.2, adapter still 0.4.1).
+// Runs `node scripts/package-extension.mjs` in the install dir. Skips
+// quietly when the script is absent (very old install / tests).
+export async function repackageExtension({ installDir, spawnFn = spawn } = {}) {
+  const script = join(installDir, 'scripts', 'package-extension.mjs');
+  try {
+    await stat(script);
+  } catch (e) {
+    return { ok: true, skipped: true, reason: 'no package-extension.mjs in install dir' };
+  }
+  const child = spawnFn(process.execPath, [script], { cwd: installDir });
+  let stderr = '';
+  if (child.stderr && child.stderr.on) child.stderr.on('data', (d) => { stderr += String(d); });
+  const code = await new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', resolve);
+  });
+  if (code !== 0) {
+    throw new Error('package-extension.mjs exited ' + code + (stderr ? ': ' + stderr.slice(0, 300) : ''));
+  }
+  return { ok: true, skipped: false };
+}
+
 // One idle update cycle. `updater` / `restarter` / `spawnSelf` are
 // injectable so tests can drive the whole flow without a real bridge,
 // GitHub, or process exit.
@@ -909,6 +936,7 @@ export async function runIdleOnlineUpdate({
   log = () => {},
   updater = { checkForUpdate, planUpdate, applyUpdate, rollback, isStableRelease },
   restarter = { restartBridge, startBridgeDetached, waitForBridgeReady },
+  packager = { repackage: repackageExtension },
   cleanupBeforeExit = null,
   spawnSelf = spawnDetachedSelf,
 } = {}) {
@@ -969,6 +997,23 @@ export async function runIdleOnlineUpdate({
     return { checked: true, updated: false };
   }
   const targetVersion = applyRes.version || remoteVersion;
+  // The adapter lives in extension/kernel/ (git-ignored build artifact):
+  // repackage it from the new kernel/ now, or the extension keeps the old
+  // adapter and its version handshake fails (v0.4.3).
+  try {
+    await packager.repackage({ installDir });
+  } catch (e) {
+    const msg = '打包插件失败：' + (e && e.message ? e.message : String(e));
+    log('在线更新回滚：' + msg);
+    try {
+      await updater.rollback({ installDir, backupDir: applyRes.backupDir, addedFiles: applyRes.added || [] });
+      await packager.repackage({ installDir });
+    } catch (rbErr) {
+      log('在线更新回滚异常：' + (rbErr && rbErr.message ? rbErr.message : String(rbErr)));
+    }
+    await writeLastUpdateRecord(dataDir, { localVersion, remoteVersion, updated: false, version: localVersion, backupDir: applyRes.backupDir, error: msg });
+    return { checked: true, updated: false };
+  }
   let restartRes;
   try {
     restartRes = await restarter.restartBridge({ installDir, expectedVersion: targetVersion, timeoutMs: 60000 });
@@ -983,6 +1028,11 @@ export async function runIdleOnlineUpdate({
     log('在线更新回滚：' + errMsg);
     try {
       await updater.rollback({ installDir, backupDir: applyRes.backupDir, addedFiles: applyRes.added || [] });
+      // The adapter was repackaged from the new kernel/ above; restore the
+      // old one now that the files are rolled back (v0.4.3, best effort).
+      try { await packager.repackage({ installDir }); } catch (pkErr) {
+        log('在线更新回滚警告：插件打包未恢复（' + (pkErr && pkErr.message ? pkErr.message : String(pkErr)) + '）');
+      }
       restarter.startBridgeDetached(installDir);
       const oldReady = await restarter.waitForBridgeReady({ timeoutMs: 30000 });
       if (oldReady.ok) {
