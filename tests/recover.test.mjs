@@ -257,3 +257,58 @@ test('router recover_last_answer with no Gemini tab errors clearly', async () =>
   assert.equal(res.ok, false);
   assert.match(res.error, /no Gemini tab is open/);
 });
+
+// ---------- stuck streaming flag (v0.4.16, teacher-005) ----------
+// teacher-005 (2026-11-22): the ask timed out with the answer text
+// complete and the stop button still up; recovery then refused for the
+// whole 5-minute poll because the old rule refused whenever the flag
+// was up. Now a recovery read returns the answer once the SAME
+// element's text has been stable past the stuck threshold — the flag
+// is stuck, the text is the truth. The first read still refuses (the
+// text was only just seen), so a genuinely mid-stream answer is never
+// returned early.
+
+test('recoverLastAnswer returns the stable answer on a later poll even while the stop button stays up', async () => {
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, stopBtnStuck: true, realStructure: true });
+  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 5000, timeoutMs: 300 });
+  const res = await asker.ask('What is 2+2?');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not finish within timeout/);
+  // A fresh adapter (like the runner's recover path after the ask
+  // failed) with a short stuck threshold: first poll refuses (text only
+  // just seen), second poll — after the threshold — returns the answer.
+  const recov = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 100, timeoutMs: 5000 });
+  const first = recov.recoverLastAnswer('What is 2+2?');
+  assert.equal(first.ok, false);
+  assert.match(first.error, /still streaming/);
+  assert.match(first.error, /stuck-flag rule/);
+  await new Promise((r) => setTimeout(r, 150));
+  const second = recov.recoverLastAnswer('What is 2+2?');
+  assert.equal(second.ok, true);
+  assert.equal(second.answer, '4 is the answer.');
+  assert.equal(second.streamingFlagStuck, true);
+  assert.equal(second.recovered, true);
+});
+
+test('recoverLastAnswer on the same adapter returns the stable answer after a late start (baseline path)', async () => {
+  // The prompt was sent but streaming started late (after the send
+  // checks and their 1s recovery poll gave up), so the ask failed with
+  // "send did not register"; the answer then arrived with the flag
+  // stuck. Recovery on the same adapter (baseline path) must return it
+  // once the text is stable.
+  const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, stopBtnStuck: true, realStructure: true, sendStartsLateMs: 1200 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 100, timeoutMs: 300 });
+  const res = await adapter.ask('What is 2+2?');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /did not register/);
+  // Streaming starts at ~1200ms; the text lands by ~1240ms.
+  await new Promise((r) => setTimeout(r, 400));
+  const first = adapter.recoverLastAnswer('What is 2+2?');
+  assert.equal(first.ok, false);
+  assert.match(first.error, /still streaming/);
+  await new Promise((r) => setTimeout(r, 150));
+  const second = adapter.recoverLastAnswer('What is 2+2?');
+  assert.equal(second.ok, true);
+  assert.equal(second.answer, '4 is the answer.');
+  assert.equal(second.streamingFlagStuck, true);
+});
