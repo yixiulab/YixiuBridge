@@ -104,6 +104,20 @@
       "channel": "stable",
       "verified_by_muse": false,
       "changelog": "修掉“老师明明在标签页里回答了，桥却报失败、答案取不回”的 bug（用户 2026-11-22 14:08 下令先解决）：(1) runner 的 fetch abort 从 min((timeoutS+90)s, 300s) 改成跟 15 分钟总预算对齐——300 秒任务以前 5 分钟就 abort，报错是裸的 This operation was aborted 且无 task_id，答案在标签页里也被丢掉；(2) 新增 recover_last_answer 工具（桥不占锁、路由器不重载标签页、适配器只认本轮新回答或匹配本轮问题的用户提问，上一轮的答案永不冒充本轮）；runner 在 ask 失败后先调一次恢复接口，取到就写 done（带 recovered: true），取不到才写 failed；(3) 发送改成多路重试：先聚焦输入框、再依次试普通点击、回车、CDP 真实点击、完整指针序列，仍不成功才轮询恢复 1 秒再判失败；(4) pollTask 改为先读状态再看 deadline，卡在 deadline 整点答完的任务也不再被丢掉。新增 tests/recover.test.mjs 等测试。"
+    },
+    {
+      "version": "0.4.14",
+      "date": "2026-11-22",
+      "channel": "stable",
+      "verified_by_muse": false,
+      "changelog": "teacher-testpc-004 暴露：0.4.13 的恢复只试一次，答案还在流式就拒绝、答案晚到几分钟也取不回。改成失败后轮询 5 分钟（每 15 秒一次，直到答案出现）；失败文件记 recover_error 和 recover_attempts；提示匹配加前后容错（“你说”前缀等）。verify30 真机证实：recovered 为 true，第一次没取到、轮询后从标签页里取回来了。"
+    },
+    {
+      "version": "0.4.15",
+      "date": "2026-11-22",
+      "channel": "stable",
+      "verified_by_muse": false,
+      "changelog": "用户下令：任务必须有看得见的进度、老师的回答必须取回来。(1) 进度可见：runner 在 tasks/status/<id>.json 里按阶段写状态（claimed 已领取 → sending 发送中 → waiting 等 Gemini 回答 → retrieving 取答案 → done/failed），每阶段带时间戳，done/failed 文件也带完整 stages 历史；(2) 取答案可靠：模型选择按钮找不到时先等 15 秒再判失败（teacher-003 冷标签页/页面未渲染完就直接失败）；恢复时即使问题没发出去、匹配不上，也把标签页里最新一条完整回答取回来，标 recovered_unmatched: true（明说没对上号），不再丢掉用户已经能看到的答案。"
     }
   ]
 }
