@@ -184,3 +184,7 @@ verify11 的 done 文件写 `asked_thinking: 高`、`thinking_warning: null`，�
 ## 路由器不再丢思考等级字段（v0.4.5）
 
 0.4.4 装上后探针 verify13 的 done 文件写 `applied_thinking: null`、`thinking_warning: null`——适配器算出了等级，但字段在路由器里丢了两处：`onAskResult` 存任务时只存了 answer/model/elapsedMs/adapterVersion 这 4 个字段，`_askGemini` 返回时又新建了一个只有 answer/model/elapsed_ms/task_id/adapter_version 的对象。两处都只传固定字段，`thinkingWarning` 与 `appliedThinking` 根本到不了桥和 runner（0.4.2 的 `thinkingWarning` 也一直是这么丢的，只是从没在真机成功回包里出现过，没人发现）。修法：`onAskResult` 存任务时带上 `thinkingWarning` 与 `appliedThinking`，`_askGemini` 返回时也带上——直通（/call 直接返回）与轮询（task_update → get_answer）两条路都通了。新增 router 测试：内容脚本回包带这两个字段时，`handle` 的返回与 `get_answer` 的存档里都有。205 测试全过。教训：加新字段要沿整条链路数一遍（适配器 → 路由器存档 → 路由器返回 → 桥 → runner → done 文件），只在两头改、中间丢了，等于没改。
+
+## 思考等级选不中时重试（v0.4.6）
+
+0.4.5 终于让 done 文件说了实话：探针 verify14 写 `applied_thinking: 低`、警告“选了 高 但打勾的是 低”——等级是真的没粘住，不是验证在撒谎。根因：真机页面常吞掉子菜单上的第一次点击（和 0.4.2 模型菜单第一次点击被吞是同一个毛病）。修法：`selectThinkingLevel` 改成点一次、验打勾项、没粘住就重新找、再点，最多 3 次；3 次都不粘才报警告（错误写明试了 3 次）。点等级的步骤抽成 `clickThinkingLevelItem`，方便循环调用。Mock 加 `levelClicksToStick`（第几次点击才粘住）模拟吞点击；新增测试：第一次被吞、第二次粘住时照常问答且 `appliedThinking` 为 高、无警告；永远不粘时 3 次后警告、照常问答。206 测试全过。注意：如果 3 次重试后真机上还是 低，说明不是吞点击，而是点击本身没点中可选项（或页面要真人手势），届时要改点击方式（对子元素派发完整指针事件序列），不要再加重试次数。
