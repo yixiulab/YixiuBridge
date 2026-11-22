@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.6';
+  var ADAPTER_VERSION = '0.4.7';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1061,6 +1061,27 @@
       return { ok: true, level: selected };
     }
 
+    // Click an element the way a real user does: a full pointer/mouse
+    // event sequence (pointerdown, mousedown, pointerup, mouseup, click).
+    // A bare el.click() only dispatches 'click'; the thinking-level
+    // submenu items ignore it — verify15 proved 3 plain clicks leave
+    // the checkmark on 低 (v0.4.7 retry did not help). Falls back to
+    // el.click() when the window has no MouseEvent (tests).
+    function clickElement(el) {
+      if (!el) return false;
+      try {
+        if (typeof win.MouseEvent === 'function') {
+          var types = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+          for (var i = 0; i < types.length; i++) {
+            var Ctor = (types[i].indexOf('pointer') === 0 && typeof win.PointerEvent === 'function') ? win.PointerEvent : win.MouseEvent;
+            el.dispatchEvent(new Ctor(types[i], { bubbles: true, cancelable: true, view: win, button: 0 }));
+          }
+          return true;
+        }
+      } catch (e) { /* fall through to .click() */ }
+      try { el.click(); return true; } catch (e2) { return false; }
+    }
+
     // Open the model menu, open the 思考等级 submenu, click the given
     // level item. Returns { ok: true } or an error object (invalid-level
     // when the level is not in the menu, apply-failed otherwise).
@@ -1096,9 +1117,9 @@
         await closeModelMenu();
         return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
-      try { match.click(); } catch (e) {
+      if (!clickElement(match)) {
         await closeModelMenu();
-        return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
+        return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed' };
       }
       return { ok: true };
     }
@@ -1114,7 +1135,7 @@
     // Verification (v0.4.4) reads the submenu's checked item via
     // readSelectedThinkingLevel — never the picker button text, which
     // misreported 高 in verify11 while the submenu showed 低.
-    // Retry (v0.4.6): the real page sometimes swallows the first click
+    // Retry (v0.4.7): the real page sometimes swallows the first click
     // on a submenu item (same quirk as the model menu's first click,
     // v0.4.2) — verify14 proved a single click leaves the checkmark on
     // 低. So click, verify, and retry up to 3 times before giving up.
@@ -1233,7 +1254,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.6: read from the
+        // carries the ACTUALLY applied level (v0.4.7: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
