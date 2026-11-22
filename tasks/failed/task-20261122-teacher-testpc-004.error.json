@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-teacher-testpc-004",
+  "error": "gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: 0.4.13] Conversation structure: elements found: model-response=1, user-query=1, div.conversation-container=1, .markdown=1, .model-response-text=1, message-content=1 | scope: infinite-scroller.chat-history.enable-lm-fast-follows.enable-lm-fast-follows-phase-2[data-test-id=\"chat-history-container\"] | turn[0]: div.conversation-container.message-actions-hover-boundary.ng-star-inserted > [user-query, model-response, div, model-response-disclaimers] text=\"你说 请把你刚才关于 Windows 11 一键安装脚本 .bat/.ps1 编码问题的完整回答再发一遍，不要省略。包括\" [adapter_version: 0.4.13]",
+  "adapter_version": "0.4.13",
+  "bridge_version": "0.4.13",
+  "bridge_task_id": "task_mws3el6b06ptub",
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T17:15:17.276Z"
+}
