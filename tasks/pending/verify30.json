@@ -1,8 +1,0 @@
-{
-  "id": "verify30",
-  "prompt": "请教三个 Windows 脚本问题（测试电脑一键安装脚本 Setup-MuseTestPC.bat + Setup-MuseTestPC.ps1）：1. .bat 报 chcp is not recognized，中文全是乱码，窗口一闪就关了，是什么原因、怎么修？2. .bat 里嵌套引号做提权（powershell -Command + Start-Process -Verb RunAs），一跑就闪退，是什么原因、怎么写才对？3. .ps1 全是中文时报一连串解析错误：152 行 Unexpected token Muse、164 行字符串缺终结符、99/90 行缺右大括号、171 行 Try 缺 Catch，是什么原因、.ps1 到底该存成什么编码？请给能直接用的修正写法。",
-  "thinking": "高",
-  "timeout_ms": 300000,
-  "created_by": "muse",
-  "created_at": "2026-11-22T18:53:39.537584+00:00"
-}
