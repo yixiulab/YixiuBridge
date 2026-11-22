@@ -20,7 +20,17 @@
 // - Completion detection: the Stop button is gone AND the latest response
 //   text is unchanged for ASK_GEMINI_STABLE_MS (default 2s). Either signal
 //   alone is not enough: the stop button can flicker, and text can pause
-//   mid-stream.
+//   mid-stream. BUT the stop button can also STICK (v0.4.16, teacher-005,
+//   2026-11-22): the answer text was complete and stable for ~15 minutes
+//   while the stop button / thinking dots stayed up, so the old
+//   "flag must clear" rule burned the whole timeout and the answer was
+//   only retrieved by the 5-minute recovery poll. So text stable for
+//   STUCK_STREAMING_MS (default 10s) counts as done even with the flag
+//   still up — the text is the truth, the flag is a hint. A genuine
+//   mid-stream pause is shorter than that (tokens flow steadily once
+//   streaming starts; the long thinking pause is BEFORE the first token,
+//   when there is no text yet). The timeout error names which signal
+//   blocked, so the next miss is diagnosed from the failed file.
 // - Send verification: after clicking Send, the adapter checks the message
 //   actually left the box — STRONG evidence only: streaming started, the
 //   box cleared, or a NEW genuine model response appeared (new/changed vs
@@ -229,6 +239,12 @@
     timeoutMs: 180000,
     pollMs: 500,
     stableMs: 2000,
+    // v0.4.16 (teacher-005): text unchanged this long counts as done even
+    // while the streaming flag is still up (the flag can stick for
+    // minutes after the text finished). 10s is long enough to rule out a
+    // genuine mid-stream pause and short enough that a completed answer
+    // is returned within ~10s of its text finishing.
+    stuckStreamingMs: 10000,
     sendCheckMs: 1000,
     model: 'gemini-web',
   };
@@ -241,7 +257,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.15';
+  var ADAPTER_VERSION = '0.4.16';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -340,6 +356,7 @@
     var timeoutMs = opts.timeoutMs || DEFAULTS.timeoutMs;
     var pollMs = opts.pollMs || DEFAULTS.pollMs;
     var stableMs = opts.stableMs || DEFAULTS.stableMs;
+    var stuckStreamingMs = opts.stuckStreamingMs || DEFAULTS.stuckStreamingMs;
     var sendCheckMs = (opts.sendCheckMs !== undefined) ? opts.sendCheckMs : DEFAULTS.sendCheckMs;
     var win = opts.win || (typeof window !== 'undefined' ? window : globalThis);
     // requestTrustedClick(levelText) -> Promise<{ok} | {ok:false, error}>.
@@ -843,6 +860,57 @@
       return false;
     }
 
+    // Cross-call text-stability tracker (v0.4.16): recoverLastAnswer is
+    // synchronous — it cannot wait N seconds to prove the text held
+    // still. Instead it remembers the latest response element + text it
+    // saw; a later call that sees the SAME element with the SAME text
+    // proves the text has been stable since the first sighting. The
+    // runner polls recovery every 15s, so two identical reads already
+    // prove 15s of stability — past the 10s stuck-flag threshold.
+    // Keyed on the element, not just the text: a new turn whose answer
+    // happens to be identical to the previous turn's must not inherit
+    // the old turn's stability.
+    var stableTrack = { el: null, text: '', since: 0 };
+    // Durations in timeout/recover errors: seconds when long, plain ms
+    // when short, so a 40ms threshold never reads as "0s of 0s".
+    function fmtDur(ms) { return ms >= 1000 ? Math.round(ms / 1000) + 's' : ms + 'ms'; }
+    function latestResponseEntry() {
+      var els = getResponseEls();
+      for (var i = els.length - 1; i >= 0; i--) {
+        var t = textOf(els[i]);
+        if (t && !isHomeScreenText(t)) return { el: els[i], text: t };
+      }
+      return null;
+    }
+    function textStableMs(entry) {
+      if (!entry) return 0;
+      if (stableTrack.el === entry.el && stableTrack.text === entry.text) {
+        return Date.now() - stableTrack.since;
+      }
+      stableTrack = { el: entry.el, text: entry.text, since: Date.now() };
+      return 0;
+    }
+
+    // The "is the answer complete" gate, shared by all three
+    // recoverLastAnswer branches (v0.4.16). The old rule refused
+    // whenever the streaming flag was up — teacher-005's flag stayed up
+    // ~15 minutes after the text finished, so recovery refused for the
+    // whole 5-minute poll while the answer sat in the tab. Now: no text
+    // = not complete; flag clear = complete; flag up but the SAME
+    // element's text unchanged for stuckStreamingMs = complete (the flag
+    // is stuck, the text is the truth). A refusal names the reason AND
+    // how stable the text already is, so the runner's recover_error
+    // shows progress instead of a bare refusal.
+    function completeAnswerOrRefusal(entry) {
+      if (!entry) return { ok: false, error: 'recover: no model answer in the tab' };
+      if (!isStreaming()) return { ok: true, answer: entry.text };
+      var stableFor = textStableMs(entry);
+      if (stableFor >= stuckStreamingMs) {
+        return { ok: true, answer: entry.text, streamingFlagStuck: true };
+      }
+      return { ok: false, error: 'recover: answer still streaming (stop button present) — text stable for ' + fmtDur(stableFor) + ' of ' + fmtDur(stuckStreamingMs) + ' needed for the stuck-flag rule' };
+    }
+
     // Read the latest COMPLETE answer already in the tab, without asking
     // again (v0.4.13). This is the recovery path for the 2026-11-22
     // teacher-testpc saga: Gemini had answered in the tab, but the
@@ -857,8 +925,10 @@
     //     prompt text (promptMatchesQuery, v0.4.15 — tolerant of how
     //     the page renders the query, see below).
     // A still-streaming answer is refused (it is not complete yet; the
-    // in-flight ask will deliver it via the task store). Returns
-    // { ok:true, answer, recovered:true } or { ok:false, error }.
+    // in-flight ask will deliver it via the task store) — UNLESS its
+    // text has been stable for stuckStreamingMs, which means the
+    // streaming flag is stuck, not the answer (v0.4.16, teacher-005).
+    // Returns { ok:true, answer, recovered:true } or { ok:false, error }.
     // NOTE: a verbatim repeat of the immediately previous prompt is
     // ambiguous — the latest user query matches, so the previous turn's
     // answer could be returned. The baseline path (the one the runner
@@ -868,13 +938,25 @@
       var p = String(prompt || '').trim();
       var base = baseline || (lastAsk && lastAsk.prompt === p ? lastAsk.baseline : null);
       if (base) {
-        // Streaming first: a stream that just started has no text yet,
-        // so the live check alone would misreport "no new response"
-        // instead of "still streaming".
-        if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
         var live = getLiveResponses(base);
-        if (!live.length) return { ok: false, error: 'recover: no new response appeared since the ask started' };
-        return { ok: true, answer: live[live.length - 1], recovered: true };
+        if (!live.length) {
+          // Streaming first: a stream that just started has no text yet,
+          // so the live check alone would misreport "no new response"
+          // instead of "still streaming".
+          if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
+          return { ok: false, error: 'recover: no new response appeared since the ask started' };
+        }
+        var liveText = live[live.length - 1];
+        var entry = latestResponseEntry();
+        if (!entry || entry.text !== liveText) {
+          // New text exists but it is not the latest element (odd
+          // re-render) — keep the old strict rule: refuse while streaming.
+          if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
+          return { ok: true, answer: liveText, recovered: true };
+        }
+        var gate = completeAnswerOrRefusal(entry);
+        if (!gate.ok) return gate;
+        return { ok: true, answer: gate.answer, recovered: true, streamingFlagStuck: !!gate.streamingFlagStuck };
       }
       var queries = getUserQueryTexts();
       var q = queries.length ? queries[queries.length - 1] : '';
@@ -885,17 +967,20 @@
         // wants it back. Fall back to the latest COMPLETE answer in
         // the tab, flagged unmatched so the caller knows it was not
         // verified against this prompt. A streaming answer is still
-        // refused (not complete yet). When the tab has no answer at
-        // all, keep the original "never sent" error.
-        if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
-        var latestUnmatched = getLatestResponseText();
-        if (!latestUnmatched) return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
-        return { ok: true, answer: latestUnmatched, recovered: true, unmatched: true };
+        // refused (not complete yet) — unless its text is stable past
+        // the stuck-flag threshold (v0.4.16). When the tab has no answer
+        // at all, keep the original "never sent" error.
+        var entryU = latestResponseEntry();
+        if (!entryU) return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
+        var gateU = completeAnswerOrRefusal(entryU);
+        if (!gateU.ok) return gateU;
+        return { ok: true, answer: gateU.answer, recovered: true, unmatched: true, streamingFlagStuck: !!gateU.streamingFlagStuck };
       }
-      if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
-      var latest = getLatestResponseText();
-      if (!latest) return { ok: false, error: 'recover: no model answer in the tab' };
-      return { ok: true, answer: latest, recovered: true };
+      var entryM = latestResponseEntry();
+      if (!entryM) return { ok: false, error: 'recover: no model answer in the tab' };
+      var gateM = completeAnswerOrRefusal(entryM);
+      if (!gateM.ok) return gateM;
+      return { ok: true, answer: gateM.answer, recovered: true, streamingFlagStuck: !!gateM.streamingFlagStuck };
     }
 
     // Poll recoverLastAnswer for up to budgetMs: a slow page may start
@@ -1500,6 +1585,17 @@
     // "no response appeared" error instead of returning pre-existing page
     // text as an answer (task -006). When new text appeared but never
     // stabilised, the old timeout error (with the partial answer) is kept.
+    // v0.4.16 (teacher-005): the streaming flag can STICK — the text was
+    // complete and stable for ~15 minutes while the stop button stayed
+    // up, so the old loop (which reset the stability clock on every poll
+    // while streaming) burned the whole timeout and the answer was only
+    // retrieved by the recovery poll. The stability clock now runs
+    // regardless of the flag: text unchanged for stableMs with the flag
+    // clear is done (fast path, unchanged), and text unchanged for
+    // stuckStreamingMs with the flag still up is ALSO done — the flag is
+    // stuck, the text is the truth. The result says how it completed
+    // (completedVia 'stable' / 'stable-while-streaming'); the timeout
+    // error names which signal blocked.
     async function waitForCompletion(startedAt, deadline, baseline) {
       baseline = baseline || [];
       var lastLive = '';
@@ -1523,22 +1619,21 @@
         var live = getLiveResponses(baseline);
         var text = live.length ? live[live.length - 1] : '';
         if (text) everLive = true;
-        if (!streaming && text) {
-          if (text === lastLive) {
-            if (stableSince === null) stableSince = Date.now();
-            if (Date.now() - stableSince >= stableMs) {
-              return { ok: true, answer: text, polls: polls, elapsedMs: Date.now() - startedAt };
-            }
-          } else {
-            lastLive = text;
-            stableSince = null;
+        if (text && text === lastLive) {
+          if (stableSince === null) stableSince = Date.now();
+          var stableFor = Date.now() - stableSince;
+          if (!streaming && stableFor >= stableMs) {
+            return { ok: true, answer: text, polls: polls, elapsedMs: Date.now() - startedAt, completedVia: 'stable' };
+          }
+          if (streaming && stableFor >= stuckStreamingMs) {
+            return { ok: true, answer: text, polls: polls, elapsedMs: Date.now() - startedAt, completedVia: 'stable-while-streaming', streamingFlagStuck: true };
           }
         } else {
-          // Still streaming, or nothing new yet: keep the newest text as
-          // the partial answer, but never finish while the stop button is
-          // up, and never carry a stale "stable" across a gap with no
+          // Text changed, or nothing new yet: keep the newest text as
+          // the partial answer, and restart the stability clock. Never
+          // carry a stale "stable" across a change or a gap with no
           // live text.
-          lastLive = text || '';
+          lastLive = text;
           stableSince = null;
         }
       }
@@ -1551,9 +1646,36 @@
           elapsedMs: Date.now() - startedAt,
         };
       }
+      // The timeout error names which signal blocked, so the next miss is
+      // diagnosed from the failed file instead of guessed. The binding
+      // constraint is reported, not just the first true flag: text that
+      // changed a moment ago is "still changing" even with the stop
+      // button up; text stable past the normal window but short of the
+      // stuck-flag threshold is "still streaming".
+      var streamingNow = isStreaming();
+      var liveNow = getLiveResponses(baseline);
+      var textNow = liveNow.length ? liveNow[liveNow.length - 1] : '';
+      var stableForMs = (textNow && textNow === lastLive && stableSince !== null) ? (Date.now() - stableSince) : 0;
+      var blockReason;
+      if (polls === 0) {
+        // The wait never ran: the deadline was already past when
+        // waiting started (model/thinking selection + send verification
+        // ate the whole timeout budget). Nothing about completion can
+        // be concluded from zero polls — say so, instead of blaming
+        // the text or the flag.
+        blockReason = 'the wait never ran — the send verification used the whole timeout budget (deadline already passed when waiting started)';
+      } else if (!textNow) {
+        blockReason = 'streaming flag clear but no live response text';
+      } else if (stableForMs < stableMs) {
+        blockReason = 'text still changing (stable for only ' + fmtDur(stableForMs) + ' of ' + fmtDur(stableMs) + ' needed)';
+      } else if (streamingNow) {
+        blockReason = 'still streaming (stop button present) — text stable for ' + fmtDur(stableForMs) + ' of ' + fmtDur(stuckStreamingMs) + ' needed for the stuck-flag rule';
+      } else {
+        blockReason = 'streaming flag clear but the text never held still';
+      }
       return {
         ok: false,
-        error: 'gemini answer did not finish within timeout (' + Math.round((deadline - startedAt) / 1000) + 's) — still streaming or page changed',
+        error: 'gemini answer did not finish within timeout (' + Math.round((deadline - startedAt) / 1000) + 's) — ' + blockReason,
         partial: lastLive,
         polls: polls,
         elapsedMs: Date.now() - startedAt,
@@ -1742,6 +1864,12 @@
         var out = { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
         if (appliedThinking) out.appliedThinking = appliedThinking;
         if (thinkingWarning) out.thinkingWarning = thinkingWarning;
+        // v0.4.16: how completion was detected — 'stable' (flag clear) or
+        // 'stable-while-streaming' (flag stuck, text stable past the
+        // threshold). The router and runner log it; the done file does
+        // not gain a field (file structure unchanged).
+        if (done.completedVia) out.completedVia = done.completedVia;
+        if (done.streamingFlagStuck) out.streamingFlagStuck = true;
         return out;
       } catch (e) {
         return { ok: false, error: 'gemini adapter error: ' + (e && e.message ? e.message : String(e)) };
