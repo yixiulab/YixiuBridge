@@ -109,6 +109,13 @@ export class FakeElement {
   // HTMLElement.focus(): marks the element focused (tests read _focused).
   focus() { this._focused = true; }
 
+  // Element.getBoundingClientRect(): fixed rect so the adapter's
+  // measureThinkingLevelItem (v0.4.11, CDP trusted click) has
+  // coordinates to return in tests. Centre is (160, 218).
+  getBoundingClientRect() {
+    return { left: 100, top: 200, width: 120, height: 36, right: 220, bottom: 236, x: 100, y: 200 };
+  }
+
   get classList() {
     const self = this;
     return { contains: (c) => self._classes.has(c), add: (c) => self._classes.add(c), remove: (c) => self._classes.delete(c) };
