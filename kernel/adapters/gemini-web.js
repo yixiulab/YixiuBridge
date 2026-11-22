@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.3';
+  var ADAPTER_VERSION = '0.4.4';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1022,16 +1022,56 @@
       return { ok: true, model: match.codename || match.label, previous: previous };
     }
 
+    // Read which thinking level is actually selected right now (ground
+    // truth): re-open the model menu, open the 思考等级 submenu, and
+    // read the item with the checkmark (parseModelItem.selected:
+    // aria-checked / checkmark). The picker button text is NOT ground
+    // truth — on the real page it often shows just the model name
+    // ("Neon") even when a level is set, and it can briefly show a
+    // level that never stuck (2026-11-22: verify11 reported 高 with no
+    // warning, but the submenu showed 低). Returns { ok, level } with
+    // level null when it cannot be read.
+    async function readSelectedThinkingLevel() {
+      var opened = await openModelMenu();
+      if (!opened.ok) return { ok: false, level: null, error: opened.error };
+      var trigger = null;
+      for (var i = 0; i < opened.items.length; i++) {
+        if (textOf(opened.items[i]).indexOf('思考') !== -1) { trigger = opened.items[i]; break; }
+      }
+      if (!trigger) {
+        await closeModelMenu();
+        return { ok: false, level: null, error: 'thinking-level submenu not found' };
+      }
+      try { trigger.click(); } catch (e) {
+        await closeModelMenu();
+        return { ok: false, level: null, error: 'thinking-level submenu click failed' };
+      }
+      await sleep(400);
+      var levelItems = readModelMenuItems();
+      var selected = null;
+      for (var j = 0; j < levelItems.length; j++) {
+        var m = parseModelItem(levelItems[j]);
+        if (m.codename) continue; // a model item, not a level
+        if (MODEL_LABELS.indexOf(m.label) !== -1) continue; // a model item
+        var t = textOf(levelItems[j]).trim();
+        if (t.indexOf('思考') !== -1) continue; // the trigger itself
+        if (m.selected) { selected = m.label; break; }
+      }
+      await closeModelMenu();
+      return { ok: true, level: selected };
+    }
+
     // Select a thinking level (e.g. "高" / "中" / "低") from the 思考等级
     // submenu. The LEVEL itself is validated strictly (an unknown level
     // is a caller error, code 'invalid-level'). Everything about APPLYING
     // it is best-effort (code 'apply-failed'): the submenu may be
-    // missing, a click may miss, or the picker button may not re-render
-    // — askImpl treats those as a warning and asks anyway instead of
-    // failing the whole task (v0.4.2: the real page left the button on
-    // "Neon" after choosing 高, which failed every ask until this was
-    // non-fatal). Verification polls the button text for ~2s instead of
-    // trusting a single 400ms read.
+    // missing, a click may miss, or the level may not stick — askImpl
+    // treats those as a warning and asks anyway instead of failing the
+    // whole task (v0.4.2: the real page left the button on "Neon" after
+    // choosing 高, which failed every ask until this was non-fatal).
+    // Verification (v0.4.4) reads the submenu's checked item via
+    // readSelectedThinkingLevel — never the picker button text, which
+    // misreported 高 in verify11 while the submenu showed 低.
     async function selectThinkingLevel(level) {
       var want = String(level || '').trim();
       if (!want) return { ok: false, code: 'invalid-level', error: 'gemini thinking level is empty' };
@@ -1070,14 +1110,12 @@
         await closeModelMenu();
         return { ok: false, code: 'apply-failed', error: 'gemini thinking level click failed: ' + (e && e.message ? e.message : String(e)) };
       }
-      var btnText = '';
-      for (var k = 0; k < 5; k++) {
-        await sleep(400);
-        btnText = getCurrentModelText();
-        if (btnText && btnText.indexOf(want) !== -1) return { ok: true, thinking: want };
+      var check = await readSelectedThinkingLevel();
+      if (check.ok && check.level === want) return { ok: true, thinking: want, applied: want };
+      if (check.ok && check.level) {
+        return { ok: false, code: 'apply-failed', applied: check.level, error: 'gemini thinking level did not stick — selected level is "' + check.level + '" after choosing "' + want + '"' };
       }
-      await closeModelMenu();
-      return { ok: false, code: 'apply-failed', error: 'gemini thinking level did not stick — picker still shows "' + (btnText || '') + '" after choosing level "' + want + '"' };
+      return { ok: false, code: 'apply-failed', applied: null, error: 'gemini thinking level could not be confirmed after choosing "' + want + '"' + (check.error ? ' (' + check.error + ')' : '') };
     }
 
     // ---------- /model selection ----------
@@ -1173,13 +1211,20 @@
         }
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
-        // is the deliverable, the level is best-effort.
+        // is the deliverable, the level is best-effort. The result
+        // carries the ACTUALLY applied level (v0.4.4: read from the
+        // submenu checkmark, never the button text) so the done file
+        // reports what was really used, not just what was requested.
         var thinkingWarning = null;
+        var appliedThinking = null;
         if (askOpts.thinking) {
           var th = await selectThinkingLevel(askOpts.thinking);
           if (!th.ok) {
             if (th.code === 'invalid-level') return th;
             thinkingWarning = th.error;
+            appliedThinking = th.applied || null;
+          } else {
+            appliedThinking = th.applied || askOpts.thinking;
           }
         }
         // The model switch can re-render the input area and can leave the
@@ -1266,6 +1311,7 @@
           return { ok: false, error: 'gemini answer finished but no response text could be extracted — UI may have changed', polls: done.polls, elapsedMs: done.elapsedMs };
         }
         var out = { ok: true, answer: done.answer, model: selectedModel || DEFAULTS.model, elapsedMs: done.elapsedMs, polls: done.polls };
+        if (appliedThinking) out.appliedThinking = appliedThinking;
         if (thinkingWarning) out.thinkingWarning = thinkingWarning;
         return out;
       } catch (e) {
