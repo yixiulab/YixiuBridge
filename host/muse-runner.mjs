@@ -237,7 +237,11 @@ function logVersionMismatch(log, bridgeVersion, adapterVersion) {
 // Profile 21 over Profile 18's stale MACs.
 export const EXTENSION_ID = 'alcjfcjfkhfacgofhgoenljfenbcgcel';
 export const CHROME_OPEN_MIN_INTERVAL_MS = 180000; // 3 min between attempts
-export const CHROME_OPEN_MAX_ATTEMPTS_PER_TASK = 3; // then stop trying for that task
+// v0.4.16: the per-task attempt cap (was CHROME_OPEN_MAX_ATTEMPTS_PER_TASK = 3)
+// is REMOVED. teacher-005 (2026-11-22) waited ~7 minutes with 0 extensions
+// while the runner's 3 attempts ran out at 20:05:06Z; the task only moved
+// when the user double-clicked .bat. As long as a task waits, the runner
+// keeps trying (3-min throttle unchanged).
 export const GEMINI_URL = 'https://gemini.google.com';
 
 function isProfileDirName(name) {
@@ -338,7 +342,7 @@ export async function findChromeExe({ env = process.env, stat: statImpl = stat }
   return null;
 }
 
-// The auto-opener: stateful (throttle + per-task attempt cap) so a stuck
+// The auto-opener: stateful (throttle + per-task attempt count) so a stuck
 // machine never spams Chrome windows. All platform/filesystem/process
 // access is injectable so tests can run on Linux; on a real PC the
 // defaults are used and the opener only acts on Windows.
@@ -361,11 +365,13 @@ export function createChromeOpener({
         return { opened: false, reason: 'throttled', nextRetryInMs: CHROME_OPEN_MIN_INTERVAL_MS - (nowMs - lastAttemptAt) };
       }
       const attempts = attemptsByTask.get(taskId) || 0;
-      if (attempts >= CHROME_OPEN_MAX_ATTEMPTS_PER_TASK) {
-        return { opened: false, reason: 'max-attempts' };
-      }
       lastAttemptAt = nowMs;
       attemptsByTask.set(taskId, attempts + 1);
+      // Bound the map: a long-lived runner seeing many tasks must not
+      // accumulate one entry per task forever. (v0.4.16: without the old
+      // per-task cap the count is log-only, so dropping old entries
+      // costs nothing.)
+      if (attemptsByTask.size > 100) attemptsByTask.clear();
       const cfg = await loadConfig(dataDir);
       const localAppData = env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
       const userDataDir = join(localAppData, 'Google', 'Chrome', 'User Data');
@@ -392,7 +398,7 @@ export function createChromeOpener({
         log('自动打开 Chrome 失败（' + (e && e.message ? e.message : String(e)) + '）— 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
         return { opened: false, reason: 'spawn-failed' };
       }
-      log('没有插件连着，正在帮你打开 Chrome（' + profile.profileDir + '）到 Gemini — 插件连上后任务 ' + taskId + ' 会自动接着做，不用你动手');
+      log('没有插件连着，正在帮你打开 Chrome（' + profile.profileDir + '）到 Gemini — 插件连上后任务 ' + taskId + ' 会自动接着做，不用你动手（第 ' + (attempts + 1) + ' 次尝试）');
       return { opened: true, profileDir: profile.profileDir, confirmed: profile.confirmed };
     },
   };
@@ -482,7 +488,7 @@ export function createGitHubClient({ token, fetchImpl = fetch, repo = REPO } = {
 
 // ---------- bridge caller (local HTTP, 127.0.0.1 only) ----------
 
-export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch, pollMs = POLL_INTERVAL_MS, overallCapMs = POLL_OVERALL_CAP_MS } = {}) {
+export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch, pollMs = POLL_INTERVAL_MS, overallCapMs = POLL_OVERALL_CAP_MS, log = () => {} } = {}) {
   async function status() {
     try {
       const res = await fetchImpl(bridgeUrl + '/status');
@@ -513,8 +519,18 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
   // finishes exactly as the cap runs out is still an answer, not a
   // timeout — the same "answer in the tab, thrown away" bug class as
   // the aborted fetch below.
+  // v0.4.16: polling writes to the log — one line when it starts, then
+  // one summary line per minute (every 4th poll at the production 15s
+  // interval). The teacher-005 wait was invisible in the log (an hour
+  // of silent 15s polls), so nobody could tell whether the runner was
+  // polling or stuck.
   async function pollTask(taskId, deadlineMs, capMs) {
+    const pollEvery = pollMs >= 1000 ? Math.round(pollMs / 1000) + 's' : pollMs + 'ms';
+    log('task ' + taskId + ': answer still streaming — polling get_answer every ' + pollEvery + ' (overall cap ' + Math.round(capMs / 1000) + 's)');
+    let pollCount = 0;
+    const pollStartedAt = Date.now();
     for (;;) {
+      pollCount++;
       let t;
       try {
         const res = await fetchImpl(bridgeUrl + '/tasks/' + encodeURIComponent(taskId));
@@ -539,7 +555,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, appliedThinking: t.appliedThinking || null, bridgeTaskId: taskId, recovered: !!t.recovered };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, appliedThinking: t.appliedThinking || null, bridgeTaskId: taskId, recovered: !!t.recovered, completedVia: t.completedVia || null, streamingFlagStuck: !!t.streamingFlagStuck };
       }
       if (t.status === 'failed') {
         // Keep the version tag in the message (it lands in the failed
@@ -557,6 +573,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         e.bridgeTaskId = taskId;
         throw e;
       }
+      if (pollCount % 4 === 0) log('poll ' + taskId + ': still running (poll #' + pollCount + ', ' + Math.round((Date.now() - pollStartedAt) / 1000) + 's elapsed)');
       await sleep(pollMs);
     }
   }
@@ -590,7 +607,9 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       // the tab but was not verified against this prompt (the prompt
       // never left the box). processOneTask records it as
       // recovered_unmatched so the reader knows.
-      return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true, unmatched: !!r.unmatched };
+      // v0.4.16: streamingFlagStuck passes through too (the answer was
+      // taken on stable text while the stop button stayed up).
+      return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true, unmatched: !!r.unmatched, streamingFlagStuck: !!r.streamingFlagStuck };
     } catch (e) {
       return null;
     } finally {
@@ -656,7 +675,7 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       if (typeof onProgress === 'function') { try { await onProgress('waiting', r.task_id); } catch (e) { /* progress is best-effort */ } }
       return pollTask(r.task_id, overallDeadline, overallCapMs);
     }
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: !!r.recovered };
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: !!r.recovered, completedVia: r.completedVia || null, streamingFlagStuck: !!r.streamingFlagStuck };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
@@ -758,7 +777,8 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     // reconnect and the task can proceed (the 2026-11-21 0.3.6 update
     // sat like this for 12 minutes until the user opened Chrome by
     // hand). Only when a task is actually waiting; the opener throttles
-    // itself and gives up after 3 tries for one task. A failure to open
+    // itself to one attempt per 3 minutes and keeps trying while the
+    // task waits (v0.4.16: no per-task cap). A failure to open
     // Chrome never fails the task — it stays pending either way.
     if (chromeOpener) {
       try {
@@ -847,6 +867,11 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
           break;
         }
         if (rec && rec.error) recoverError = rec.error;
+        // v0.4.16: one short line per attempt — the teacher-005
+        // recovery ran ~20 silent polls, so nobody could tell whether
+        // it was trying or stuck. The reason comes from the adapter
+        // (streaming + how stable the text already is).
+        log('task ' + task.id + ': recover attempt ' + recoverAttempts + ' — ' + (rec && rec.error ? rec.error : 'bridge unreachable'));
         if (Date.now() >= recoverDeadline) break;
         await sleep(Math.max(0, Math.min(recoverPollMs, recoverDeadline - Date.now())));
       }
@@ -896,7 +921,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
   await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, appliedThinking: answer.appliedThinking || null, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
-  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId, recovered: !!answer.recovered };
+  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId, recovered: !!answer.recovered, completedVia: answer.completedVia || null, streamingFlagStuck: !!answer.streamingFlagStuck };
 }
 
 // ---------- run loop ----------
@@ -1012,7 +1037,7 @@ export async function acquireLock(dataDir, log = logLine) {
 // to await loadConfig, and it invented timer/lock variable names that
 // do not exist in runRunner.)
 
-export const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes (was 1 hour — a test cycle then waited an hour for the auto-install; 2 min keeps the runner's idle check cheap and lets a new stable version land on its own within minutes)
+export const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes (was 2 min — a test value from 2026-11-22 that checked 720x/day even when already latest; 30 min lands a new stable within half an hour without the churn. Set by the user 2026-11-22 20:55, conditional on 0.4.15 testing clean on the real machine — it did, via teacher-005.)
 export const RUNNER_SELF_RESTART_FILES = new Set([
   'host/muse-runner.mjs',
   'kernel/shared/constants.js',
@@ -1213,6 +1238,30 @@ export async function runIdleOnlineUpdate({
   return { checked: true, updated: true };
 }
 
+// Watchdog registration (v0.4.16): make sure a scheduled task exists that
+// checks this runner's heartbeat every 3 minutes and restarts it when it
+// goes stale. Best-effort only — a registration failure must never block
+// the runner from starting (the runner still works without a watchdog;
+// the user can always double-click .bat as before).
+// win32 only (the watchdog is a PowerShell script + Windows Scheduled
+// Task). Runs detached and unref'd; never waits for the result. The
+// registration itself is idempotent (Register-ScheduledTask -Force
+// overwrites the existing task), so calling it on every runner start is
+// safe. spawnImpl is injectable so tests can prove the call shape
+// without launching PowerShell.
+export function ensureWatchdogRegistered({ installDir, platform = process.platform, spawnImpl = spawn, log = () => {} } = {}) {
+  if (platform !== 'win32') return false;
+  try {
+    const script = join(installDir, 'scripts', 'watchdog.ps1');
+    const child = spawnImpl('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Register'], { detached: true, stdio: 'ignore' });
+    if (child && typeof child.unref === 'function') child.unref();
+    return true;
+  } catch (e) {
+    log('watchdog registration failed (best-effort, runner still starts): ' + (e && e.message ? e.message : String(e)));
+    return false;
+  }
+}
+
 export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchImpl = fetch, bridgeUrl = C.BRIDGE_URL } = {}) {
   const cfg = await loadConfig(dataDir);
   if (!cfg.github_token) {
@@ -1226,7 +1275,7 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
     ? intervalS
     : (cfg.runner_interval_s || DEFAULT_INTERVAL_S);
   const github = createGitHubClient({ token: cfg.github_token, fetchImpl });
-  const bridge = createBridgeCaller({ bridgeUrl, fetchImpl });
+  const bridge = createBridgeCaller({ bridgeUrl, fetchImpl, log });
   // v0.3.7: the runner opens Chrome itself when a task is waiting and no
   // extension is connected (see createChromeOpener).
   const chromeOpener = createChromeOpener({ dataDir });
@@ -1234,6 +1283,10 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
   const installDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   let lastUpdateCheckAt = 0;
   const lockPath = await acquireLock(dataDir, log);
+  // Watchdog (v0.4.16): register the 3-minute heartbeat check so a hung
+  // runner restarts itself instead of waiting for a .bat double-click.
+  // Best-effort — registration never blocks startup.
+  ensureWatchdogRegistered({ installDir, log });
   // Heartbeat (v0.3.4): proves this runner is alive. A later runner that
   // finds a stale lock uses it to tell a live runner from a dead one.
   // unref so it never keeps the process alive on its own.
@@ -1262,12 +1315,14 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
         log('task ' + res.id + ': ' + res.status
           + (res.elapsedMs ? ' (' + res.elapsedMs + 'ms)' : '')
           + (res.adapterVersion ? ' — adapter v' + res.adapterVersion : '')
+          + (res.streamingFlagStuck ? ' — streaming flag was stuck, answer taken on stable text' : '')
           + (res.error ? ' — ' + res.error : ''));
       }
       // bridge-down / no-extension / busy: already logged inside processOneTask.
       // Idle online update (v0.4.0): only when this poll found no pending
-      // task at all, and at most once an hour. The loop is strictly
-      // sequential, so an update can never overlap a task ask.
+      // task at all, and at most once per UPDATE_CHECK_INTERVAL_MS (30 min
+      // since v0.4.16). The loop is strictly sequential, so an update can
+      // never overlap a task ask.
       if (res.status === 'empty' && Date.now() - lastUpdateCheckAt >= UPDATE_CHECK_INTERVAL_MS) {
         try {
           const upd = await runIdleOnlineUpdate({ dataDir, installDir, bridge, log, cleanupBeforeExit: cleanup });
