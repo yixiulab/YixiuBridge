@@ -67,16 +67,26 @@ test('empty prompt is rejected without touching the page', async () => {
   assert.match(res.error, /prompt is empty/);
 });
 
-test('streaming that never finishes times out with the partial answer', async () => {
+test('streaming that never finishes ends at the hard cap with the partial answer (v0.4.17)', async () => {
+  // Was: 'streaming that never finishes times out with the partial
+  // answer'. The user ordered (2026-11-22) that the wait must NOT cut
+  // off at a fixed time while Gemini is still working — a stop button
+  // that never goes away used to end the ask at the 300ms deadline,
+  // but the text is complete and stable, so the wait now extends and
+  // the stuck-flag rule would complete it at stuckStreamingMs. The
+  // only thing that still ends the wait is the hard cap: with
+  // hardCapMs 400 (shorter than the 10s stuck threshold) the ask ends
+  // there, and the error still carries the partial answer.
   const page = createMockGeminiPage({ chunks: ['partial…'], chunkMs: 10 });
   // Never remove the stop button: patch the send handler by adding a second
   // stop button that stays forever.
   const forever = new FakeElement('button', { 'aria-label': 'Stop generating' });
   page.doc.body.appendChild(forever);
-  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, timeoutMs: 300 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, timeoutMs: 300, activeGraceMs: 300, hardCapMs: 400 });
   const res = await adapter.ask('hello');
   assert.equal(res.ok, false);
   assert.match(res.error, /did not finish within timeout/);
+  assert.match(res.error, /hard cap reached/);
   assert.equal(res.partial, 'partial…');
 });
 
@@ -166,36 +176,90 @@ test('ask still reports the fast path when the flag clears normally', async () =
   assert.equal(res.streamingFlagStuck, undefined);
 });
 
-test('timeout error names the streaming flag when the text is stable but the flag is stuck', async () => {
+test('ask extends past the fixed deadline while the stop button stays up, and returns the answer once the text holds still (v0.4.17)', async () => {
+  // Was: 'timeout error names the streaming flag when the text is stable
+  // but the flag is stuck'. The user ordered (2026-11-22) that the wait
+  // must NOT cut off at a fixed time while Gemini is still working — so
+  // a stuck stop button no longer ends the ask at the deadline. The
+  // wait now extends while the flag is up, and the text-stability rule
+  // (stuckStreamingMs) completes it.
   const page = createMockGeminiPage({ chunks: ['partial…'], chunkMs: 10 });
-  // The mock's own stop button goes away when the chunks finish; add a
-  // second one that stays forever, so the flag is stuck while the text
-  // is stable — but the stuck threshold (1000ms) is longer than the
-  // 300ms timeout, so this ask must still time out, with a reason.
   const forever = new FakeElement('button', { 'aria-label': 'Stop generating' });
   page.doc.body.appendChild(forever);
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, stuckStreamingMs: 1000, sendCheckMs: 10, timeoutMs: 300 });
   const res = await adapter.ask('hello');
-  assert.equal(res.ok, false);
-  assert.match(res.error, /did not finish within timeout/);
-  assert.match(res.error, /still streaming/);
-  assert.match(res.error, /stuck-flag rule/);
-  assert.equal(res.partial, 'partial…');
+  assert.equal(res.ok, true, 'expected the extended wait to return the answer, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, 'partial…');
+  assert.equal(res.completedVia, 'stable-while-streaming');
 });
 
-test('timeout error says the text is still changing when it never stabilises', async () => {
-  // A chunk lands every 100ms, so the text is never stable for the
-  // 1000ms stuck threshold (or the 40ms stable window — the flag is up
-  // the whole time, so only the stuck rule applies). sendCheckMs is
-  // FAST so the wait starts on time; without it the 1000ms default
-  // send check would eat the whole 250ms timeout before the wait even
-  // starts, and the error would describe a deadline already passed
-  // instead of a text still changing.
+test('ask extends past the fixed deadline while the text is still changing, and returns the full answer (v0.4.17)', async () => {
+  // Was: 'timeout error says the text is still changing when it never
+  // stabilises'. The user ordered (2026-11-22) that the wait must NOT
+  // cut off at a fixed time while Gemini is still generating — a chunk
+  // landing every 100ms is live generation, not a timeout. The wait
+  // now extends while the text keeps changing and returns the answer
+  // once it holds still. (The hard-cap error case moved to the test
+  // below.)
   const page = createMockGeminiPage({ chunks: ['a', 'b', 'c', 'd', 'e'], chunkMs: 100 });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, stuckStreamingMs: 1000, sendCheckMs: 10, timeoutMs: 250 });
+  const started = Date.now();
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, true, 'expected the extended wait to return the answer, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, 'abcde');
+  assert.ok(res.elapsedMs > 250, 'the answer must arrive after the 250ms deadline proves the wait extended, elapsed ' + res.elapsedMs + 'ms');
+  assert.ok(Date.now() - started < 5000);
+});
+
+test('the hard cap still ends the wait, and the error names the cap (v0.4.17)', async () => {
+  // Same still-changing page as above, but the hard cap (400ms) fires
+  // while the text is still changing — the flexible wait is not
+  // unbounded, and the error must say which cap ended it.
+  const page = createMockGeminiPage({ chunks: ['a', 'b', 'c', 'd', 'e'], chunkMs: 100 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, stuckStreamingMs: 1000, sendCheckMs: 10, timeoutMs: 250, activeGraceMs: 300, hardCapMs: 400 });
   const res = await adapter.ask('hello');
   assert.equal(res.ok, false);
   assert.match(res.error, /did not finish within timeout/);
-  assert.match(res.error, /text still changing/);
-  assert.equal(res.partial, 'ab');
+  assert.match(res.error, /hard cap reached/);
+});
+
+test('ask extends while Gemini is still thinking with no text yet, and returns the answer (v0.4.17)', async () => {
+  // The query is in the conversation and the thinking dots are showing,
+  // but no text has streamed yet — the fixed deadline (300ms) must not
+  // end the wait. The response only starts at 1500ms.
+  const page = createMockGeminiPage({ chunks: ['OK'], chunkMs: 10, responseDelayMs: 1500 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, sendCheckMs: 10, timeoutMs: 300, activeGraceMs: 300, hardCapMs: 5000 });
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, true, 'expected the thinking-phase wait to return the answer, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, 'OK');
+  assert.ok(res.elapsedMs > 300, 'the answer must arrive after the 300ms deadline proves the wait extended, elapsed ' + res.elapsedMs + 'ms');
+});
+
+test('ask still fails at the deadline when nothing ever happens (v0.4.17)', async () => {
+  // No chunks, no streaming, no thinking dots: no activity at all, so
+  // the flexible wait has nothing to extend on and the ask fails at
+  // the fixed deadline exactly as before.
+  const page = createMockGeminiPage({ chunks: [], chunkMs: 10 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, pollMs: 20, stableMs: 40, sendCheckMs: 10, timeoutMs: 300, activeGraceMs: 300, hardCapMs: 5000 });
+  const started = Date.now();
+  const res = await adapter.ask('hello');
+  assert.equal(res.ok, false);
+  assert.match(res.error, /no response appeared/);
+  assert.ok(Date.now() - started < 2000, 'an idle page must fail near the deadline, not after the grace/hard cap, took ' + (Date.now() - started) + 'ms');
+});
+
+test('send is confirmed when the prompt appears as a new user-query turn even before streaming starts (v0.4.17)', async () => {
+  // verify33 (2026-11-22): no send button on the page, Enter dispatched,
+  // the prompt WAS in the conversation — but the adapter judged the
+  // send a failure because the box had not cleared and streaming had
+  // not started yet. The prompt appearing as a NEW user-query turn is
+  // the send; the ask must proceed to wait for the answer instead of
+  // failing. The response only starts at 1500ms (thinking phase), so
+  // this also exercises the flexible wait.
+  const page = createMockGeminiPage({ sendKind: 'icon-only', sendOnEnter: true, responseDelayMs: 1500, chunks: ['OK'], chunkMs: 10 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 10000, activeGraceMs: 300, hardCapMs: 5000 });
+  const res = await adapter.ask('请只回复：OK');
+  assert.equal(res.ok, true, 'expected the query-turn send check to proceed to the answer, got: ' + JSON.stringify(res));
+  assert.equal(res.answer, 'OK');
+  assert.equal(res.recovered, undefined, 'the answer must come from the normal path, not recovery');
 });
