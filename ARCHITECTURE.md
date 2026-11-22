@@ -192,3 +192,7 @@ verify11 的 done 文件写 `asked_thinking: 高`、`thinking_warning: null`，�
 ## 思考等级改真人式点击 + 更新检查改 2 分钟（v0.4.7）
 
 verify15 证明重试也不管用：0.4.6 试了 3 次，`applied_thinking` 还是 低。不是吞点击，是裸 `.click()` 只派发一个 click 事件，思考等级子菜单项根本不认——发送按钮、模型菜单都认 `.click()`，唯独等级项不认。修法：新增 `clickElement`，对等级项派发真人点击的全序列 pointerdown → mousedown → pointerup → mouseup → click（bubbles、cancelable、button 0）；窗口没有 MouseEvent 时（测试）回退到 `.click()`。同版还按用户建议把 runner 空闲更新检查从 1 小时改成 2 分钟——原来每同步一个新版都要等一小时才自动装，测试循环太慢；2 分钟后新稳定版不用双击也能自己装上（runner 本来每 60 秒就轮询一次任务，2 分钟查一次更新不增加多少开销）。注意：如果真人式点击后还是 低，下一步是点子元素（菜单项里的 radio/input）而不是容器本身。
+
+## 思考等级改点子元素（v0.4.8）
+
+verify16 证明真人式点击也不管用：0.4.7 试了 3 次全序列，`applied_thinking` 还是 低。根因换了一个：可选项（radio）藏在菜单项里面，点容器根本够不着它——事件只往上冒、不往下传，容器上的点击永远传不到里面的 radio 上。修法：新增 `findLevelClickTarget`，按顺序找：菜单项里面的 `input[type="radio"]` / `[role="radio"]` / `mat-radio-button`，再找最深的含等级文字的元素（常在 radio 的 label 里，点它能激活 radio），最后才点容器本身。Mock 加 `levelRadioInside`（radio 在菜单项里面、只有点 radio 才生效）模拟真机；新增测试：radio 在里面时照常问答且 `appliedThinking` 为 高、无警告。207 测试全过。注意：如果点子元素后还是 低，下一步是键盘操作（focus 后按 Enter/Space）或读页面真实结构再定，不要再换点击目标。
