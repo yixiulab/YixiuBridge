@@ -162,6 +162,11 @@ export function taskFilePaths(id) {
     pending: 'tasks/pending/' + id + '.json',
     done: 'tasks/done/' + id + '.answer.json',
     failed: 'tasks/failed/' + id + '.error.json',
+    // v0.4.15: live progress — the runner rewrites this file at every
+    // stage (claimed, sending, waiting, retrieving, done/failed), so
+    // the user can see where a task is without guessing. The done /
+    // failed file also carries the full stage history.
+    status: 'tasks/status/' + id + '.json',
   };
 }
 
@@ -581,7 +586,11 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       if (!out.ok) return { error: out.error || 'recover_last_answer: bridge call failed' };
       const r = out.result || {};
       if (!r.answer) return { error: r.error || 'recover_last_answer: no answer in the tab' };
-      return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true };
+      // v0.4.15: unmatched passes through — the answer is the latest in
+      // the tab but was not verified against this prompt (the prompt
+      // never left the box). processOneTask records it as
+      // recovered_unmatched so the reader knows.
+      return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true, unmatched: !!r.unmatched };
     } catch (e) {
       return null;
     } finally {
@@ -589,7 +598,11 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
   }
 
-  async function ask({ prompt, model, thinking, timeoutMs }) {
+  // v0.4.15: onProgress(stage, detail) is called when the ask enters
+  // the long poll for a pending bridge task ('waiting'), so the runner
+  // can record the stage in the task's status file. processOneTask
+  // records 'sending' itself before calling ask.
+  async function ask({ prompt, model, thinking, timeoutMs, onProgress }) {
     const timeoutS = Math.min(Math.max(Math.round((timeoutMs || 180000) / 1000), 5), MAX_ASK_TIMEOUT_S);
     // Overall budget for the whole ask, including polling after a
     // timeout/pending: 15 minutes from the ask start (v0.3.4, task -007 —
@@ -627,7 +640,10 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       // running in the browser — poll for the result instead of failing.
       // Without a task_id there is nothing to poll; fail as before
       // (connection error, no extension, browser busy).
-      if (out.task_id) return pollTask(out.task_id, overallDeadline, overallCapMs);
+      if (out.task_id) {
+        if (typeof onProgress === 'function') { try { await onProgress('waiting', out.task_id); } catch (e) { /* progress is best-effort */ } }
+        return pollTask(out.task_id, overallDeadline, overallCapMs);
+      }
       const e = new Error(out.error || 'bridge call failed');
       if (/browser busy/.test(out.error || '')) e.code = 'busy';
       // The router embeds "[adapter_version: X]" in its error strings;
@@ -636,7 +652,10 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
       throw e;
     }
     const r = out.result || {};
-    if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, overallDeadline, overallCapMs);
+    if (r.status === 'pending' && r.task_id) {
+      if (typeof onProgress === 'function') { try { await onProgress('waiting', r.task_id); } catch (e) { /* progress is best-effort */ } }
+      return pollTask(r.task_id, overallDeadline, overallCapMs);
+    }
     if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: !!r.recovered };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
@@ -760,11 +779,32 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   const extWord = st.extensions === 1 ? '1 extension' : st.extensions + ' extensions';
   log('bridge v' + (bridgeVersion || '?') + ' (disk v' + (st.diskVersion || '?') + '), ' + extWord + ' connected — asking task ' + task.id);
 
+  // v0.4.15: visible progress. The runner rewrites tasks/status/<id>.json
+  // at every stage, so the user can see a task is claimed, sending,
+  // waiting for Gemini, retrieving the answer, or done/failed — and how
+  // long each stage took. The write is best-effort and never fails the
+  // task. The full stage history also lands in the done/failed file.
+  const stages = [];
+  let statusSha = null;
+  async function recordStage(stage, detail) {
+    const entry = { stage, at: new Date().toISOString(), detail: detail || null };
+    stages.push(entry);
+    const doc = { id: task.id, stage, detail: detail || null, updated_at: entry.at, stages };
+    try {
+      const res = await github.putFile(paths.status, JSON.stringify(doc, null, 2), 'muse-runner: task ' + task.id + ' stage ' + stage, statusSha || undefined);
+      if (res && res.content && res.content.sha) statusSha = res.content.sha;
+    } catch (e) {
+      log('status write failed for stage ' + stage + ' (continuing): ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+  await recordStage('claimed', 'bridge v' + (bridgeVersion || '?') + ', ' + extWord + ' connected');
+
   const askedModel = task.model || DEFAULT_MODEL;
   const askedThinking = task.thinking || DEFAULT_THINKING;
   let answer;
+  await recordStage('sending', 'model ' + askedModel + ', thinking ' + askedThinking);
   try {
-    answer = await bridge.ask({ prompt: task.prompt, model: askedModel, thinking: askedThinking, timeoutMs: task.timeout_ms || 180000 });
+    answer = await bridge.ask({ prompt: task.prompt, model: askedModel, thinking: askedThinking, timeoutMs: task.timeout_ms || 180000, onProgress: async (stage, detail) => { await recordStage(stage, detail); } });
   } catch (e) {
     if (e.code === 'busy' || /browser busy/.test(e.message || '')) {
       log('browser busy — leaving task ' + task.id + ' pending');
@@ -791,6 +831,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     let recoverError = null;
     let recoverAttempts = 0;
     if (typeof bridge.recoverLastAnswer === 'function') {
+      await recordStage('retrieving', 'ask failed: ' + (e.message || String(e)).slice(0, 120));
       const recoverDeadline = Date.now() + recoverBudgetMs;
       while (!answer) {
         let rec = null;
@@ -818,7 +859,8 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
       // v0.3.4: the failed file carries the bridge task_id whenever one
       // exists, so the answer can still be retrieved later via get_answer
       // even when this run gave up (e.g. the 15-minute poll cap ran out).
-      const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, recover_error: recoverError, recover_attempts: recoverAttempts, failed_at: new Date().toISOString() };
+      await recordStage('failed', errMsg.slice(0, 200));
+      const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, recover_error: recoverError, recover_attempts: recoverAttempts, stages, failed_at: new Date().toISOString() };
       await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
       await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
       await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, askedThinking, adapterVersion, bridgeVersion, bridgeTaskId }), log);
@@ -829,6 +871,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   const adapterVersion = answer.adapterVersion || null;
   const bridgeTaskId = answer.bridgeTaskId || null;
   logVersionMismatch(log, bridgeVersion, adapterVersion);
+  await recordStage('done', 'answer received' + (answer.recovered ? ' (recovered from tab' + (answer.unmatched ? ', unmatched' : '') + ')' : ''));
   const doneDoc = {
     id: task.id,
     answer: answer.answer,
@@ -840,9 +883,14 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     answered_model: answer.model || null,
     thinking_warning: answer.thinkingWarning || null,
     recovered: !!answer.recovered,
+    // v0.4.15: the answer is the latest in the tab but was not verified
+    // against this prompt (the prompt never left the box). The reader
+    // must know it may belong to a different question.
+    recovered_unmatched: !!answer.unmatched,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
     bridge_task_id: bridgeTaskId,
+    stages,
     answered_at: new Date().toISOString(),
   };
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
