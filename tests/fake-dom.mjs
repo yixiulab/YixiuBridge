@@ -23,6 +23,21 @@ export class FakeKeyboardEvent extends FakeEvent {
   }
 }
 
+// Mouse/pointer events (v0.4.13): the adapter's clickElement dispatches a
+// full pointer sequence when win.MouseEvent exists; without it, it falls
+// back to a bare el.click(). The fake window now provides both, so the
+// pointer-sequence send path is exercised in tests exactly as on the
+// real page.
+export class FakeMouseEvent extends FakeEvent {
+  constructor(type, opts = {}) {
+    super(type, opts);
+    this.button = opts.button || 0;
+    this.view = opts.view || null;
+  }
+}
+
+export class FakePointerEvent extends FakeMouseEvent {}
+
 function parseSimple(sel) {
   // Returns { tag, id, classes[], attrs[] } or null if unsupported.
   const out = { tag: null, id: null, classes: [], attrs: [] };
@@ -207,6 +222,8 @@ export class FakeWindow {
   constructor() {
     this.Event = FakeEvent;
     this.KeyboardEvent = FakeKeyboardEvent;
+    this.MouseEvent = FakeMouseEvent;
+    this.PointerEvent = FakePointerEvent;
     this.HTMLTextAreaElement = undefined; // forces the adapter's direct-assignment path
     this.HTMLInputElement = undefined;
   }
