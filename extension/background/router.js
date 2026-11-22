@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.2';
+    this.version = opts.version || '0.4.3';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -143,8 +143,13 @@
 
   Router.prototype._findGeminiTab = async function () {
     var tabs = await chrome.tabs.query({ url: 'https://gemini.google.com/*' });
-    if (tabs && tabs.length) return tabs[0];
-    return null;
+    if (!tabs || !tabs.length) return null;
+    // Prefer the tab the user is looking at: background tabs may be
+    // discarded (Memory Saver), and a discarded tab answers no ping.
+    for (var i = 0; i < tabs.length; i++) {
+      if (tabs[i].active) return tabs[i];
+    }
+    return tabs[0];
   };
 
   Router.prototype._waitForTabReady = async function (tabId, timeoutMs) {
@@ -208,9 +213,22 @@
       if (cs === 'stale') {
         throw new Error('Gemini content script is still an old version after reloading the tab — reload the extension in chrome://extensions (it should show ' + this.version + ') and try again');
       }
+      if (cs === false) {
+        // The tab itself is broken (discarded, error page, orphaned script
+        // a reload did not restore — seen 2026-11-22 verify6/verify7).
+        // Open a fresh Gemini tab and try that once before giving up.
+        var fresh = await chrome.tabs.create({ url: C.GEMINI_URL, active: false });
+        ready = await this._waitForTabReady(fresh.id, 30000);
+        if (!ready) throw new Error('Gemini tab did not finish loading within 30s');
+        cs = await this._pingContentScript(fresh.id, this._pingTimeoutMs);
+        if (cs === 'stale') {
+          throw new Error('Gemini content script is still an old version after reloading the tab — reload the extension in chrome://extensions (it should show ' + this.version + ') and try again');
+        }
+        if (cs === 'ok') tab = fresh;
+      }
     }
     if (cs !== 'ok') {
-      throw new Error('Gemini content script did not answer even after reloading the tab once — are you logged in to gemini.google.com in this Chrome profile?');
+      throw new Error('Gemini content script did not answer — the Gemini tab was reloaded and a fresh tab was opened, neither answered. Are you logged in to gemini.google.com in this Chrome profile?');
     }
     return tab;
   };
