@@ -433,3 +433,28 @@ test('ask_gemini registers the task with the bridge immediately (running update 
   assert.equal(taskUpdates[1].taskId, res.result.task_id);
   assert.equal(taskUpdates[1].task.status, 'done');
 });
+
+test('ask_gemini success result carries completion detection fields through (v0.4.16)', async () => {
+  // The adapter reports how it decided the answer was done; the router
+  // must not drop those fields (the 0.4.5 lesson: a field the router
+  // drops never reaches the runner's log). The done file does not gain
+  // a field — the runner only logs completedVia — but the bridge
+  // result and the task store both carry it.
+  const router = makeGeminiRouter({
+    sendMessageImpl: async (tabId, msg) => {
+      if (msg.tool === 'ping') return { ok: true, page: 'gemini', version: '0.2.0-test', adapter_version: '0.2.0-test' };
+      if (msg.tool === 'ask_gemini') {
+        setTimeout(() => router.onAskResult(msg.taskId, { ok: true, answer: 'hi', model: 'Neon', elapsedMs: 10, adapter_version: '0.2.0-test', completedVia: 'stable-while-streaming', streamingFlagStuck: true }), 5);
+        return { ok: true, started: true, taskId: msg.taskId };
+      }
+      throw new Error('unexpected tool ' + msg.tool);
+    },
+  });
+  const res = await router.handle({ tool: 'ask_gemini', params: { prompt: 'hello', timeout_s: 30 } });
+  assert.equal(res.ok, true);
+  assert.equal(res.result.completedVia, 'stable-while-streaming');
+  assert.equal(res.result.streamingFlagStuck, true);
+  const stored = await router.handle({ tool: 'get_answer', params: { task_id: res.result.task_id } });
+  assert.equal(stored.result.completedVia, 'stable-while-streaming');
+  assert.equal(stored.result.streamingFlagStuck, true);
+});
