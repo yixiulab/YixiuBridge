@@ -377,5 +377,20 @@
     "elapsed_ms": null,
     "error": "gemini no response appeared — the prompt may not have been sent, or the page never rendered a model response (still on the home screen?) [adapter_version: 0.4.12] Conversation structure: elements found: model-response=0, user-query=1, div.conversation-container=0, .markdown=0, .model-response-text=0, message-content=0 | scope: infinite-scroller.chat-history.enable-lm-fast-follows.enable-lm-fast-follows-phase-2[data-test-id=\"chat-history-container\"] | turn[0]: pending-request.conversation-container.first-prompt.ng-star-inserted > [user-query, thinking-dots-animation, pending-response] text=\"你说 请只回复：OK 请只回复：OK\" [adapter_version: 0.4.12]",
     "at": "2026-11-22T12:09:28.847Z"
+  },
+  {
+    "id": "task-20261122-bridge-0412-verify28",
+    "status": "failed",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": null,
+    "answered_model": null,
+    "adapter_version": null,
+    "bridge_version": "0.4.12",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "This operation was aborted",
+    "at": "2026-11-22T12:37:56.481Z"
   }
 ]
