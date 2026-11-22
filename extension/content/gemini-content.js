@@ -17,7 +17,7 @@
   // tab opened earlier still runs the OLD content script (Chrome does not
   // re-inject on extension reload), so the router reloads the tab once
   // when this version is stale or missing.
-  var CONTENT_VERSION = '0.4.11';
+  var CONTENT_VERSION = '0.4.12';
 
   function getAdapter() {
     if (adapter) return adapter;
@@ -30,7 +30,7 @@
   }
 
   // Ask the background service worker for a real (CDP) trusted click
-  // on a thinking-level item (v0.4.11). Resolves {ok} / {ok:false,
+  // on a thinking-level item (v0.4.12). Resolves {ok} / {ok:false,
   // error}. Times out after 15s so a missing or dead background never
   // hangs an ask — the adapter then falls back to synthetic methods.
   function requestTrustedClick(levelText) {
@@ -95,7 +95,7 @@
       return false;
     }
 
-    // Background (trusted-click flow, v0.4.11): measure a thinking-level
+    // Background (trusted-click flow, v0.4.12): measure a thinking-level
     // item's viewport centre AFTER the debugger is attached, so the
     // coordinates already account for the debug infobar's viewport
     // shift. The submenu must already be open — the adapter only reads.
