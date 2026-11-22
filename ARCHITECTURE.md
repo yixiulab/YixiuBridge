@@ -180,3 +180,7 @@ Muse（云端） --GET tasks/done/<id>.answer.json--> GitHub
 ## 思考等级验证改读菜单打勾项（v0.4.4）
 
 verify11 的 done 文件写 `asked_thinking: 高`、`thinking_warning: null`，但用户截图证明回复 OK 的对话里思考等级打勾的是 **低**。根因：0.4.2 的验证是读按钮文字子串——按钮一闪显示 高 就算通过，但按钮文字在真机上不可靠（常只显示模型名 "Neon"，不带等级），且选中的状态本身在菜单里。修法：`selectThinkingLevel` 选完后调用新增的 `readSelectedThinkingLevel()`，重新打开模型菜单 → 点开 思考等级 子菜单 → 读 `parseModelItem.selected`（aria-checked / 打勾标记）真正打勾的那一项；打勾是 高 才算成功，返回里带 `applied`；打勾是别的等级 → `apply-failed`，错误写明实际选中的等级（`selected level is "中"`），`applied` 记下来；读不到打勾项 → `apply-failed`（无法确认）。`askImpl` 把实际用的等级放进结果 `appliedThinking`，runner 接进 done 文件 `applied_thinking` 和用量日志——done 文件从此同时记“要的”和“实际用的”，两者对不上时一眼就能看出来。204 测试全过。注意：这次修的是验证的诚实性；如果真机上选 高 后打勾项仍是 低（等级本身没 stuck 住，或 Gemini 问完就重置回 低），探针的 `applied_thinking` 会如实写 低，届时再查是选不中还是问完重置。
+
+## 路由器不再丢思考等级字段（v0.4.5）
+
+0.4.4 装上后探针 verify13 的 done 文件写 `applied_thinking: null`、`thinking_warning: null`——适配器算出了等级，但字段在路由器里丢了两处：`onAskResult` 存任务时只存了 answer/model/elapsedMs/adapterVersion 这 4 个字段，`_askGemini` 返回时又新建了一个只有 answer/model/elapsed_ms/task_id/adapter_version 的对象。两处都只传固定字段，`thinkingWarning` 与 `appliedThinking` 根本到不了桥和 runner（0.4.2 的 `thinkingWarning` 也一直是这么丢的，只是从没在真机成功回包里出现过，没人发现）。修法：`onAskResult` 存任务时带上 `thinkingWarning` 与 `appliedThinking`，`_askGemini` 返回时也带上——直通（/call 直接返回）与轮询（task_update → get_answer）两条路都通了。新增 router 测试：内容脚本回包带这两个字段时，`handle` 的返回与 `get_answer` 的存档里都有。205 测试全过。教训：加新字段要沿整条链路数一遍（适配器 → 路由器存档 → 路由器返回 → 桥 → runner → done 文件），只在两头改、中间丢了，等于没改。
