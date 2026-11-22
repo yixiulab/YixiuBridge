@@ -497,5 +497,20 @@
     "elapsed_ms": 19621,
     "error": null,
     "at": "2026-11-22T19:11:34.741Z"
+  },
+  {
+    "id": "task-20261122-bridge-teacher-003",
+    "status": "failed",
+    "prompt": "我是 Chrome 扩展开发者，在写一个操作 Gemini 网页版的扩展，卡在一个具体问题上，请直接给能用的办法。\n\n【页面真实结构】（我已在真机上看过）：Gemini 模型选择器里有个“思考等级”子菜单，三项都是 role=\"menuitemradio\"，用 aria-checked 表示选中，顺序是 低/中/高。文字是“等级 + 描述”：低 快速、高效 / 中 深度适中 / 高 超级详尽。里面…",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": null,
+    "answered_model": null,
+    "adapter_version": "0.4.14",
+    "bridge_version": "0.4.14",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "ask_gemini failed: ask_gemini: gemini model picker button not found — UI may have changed (tried: button[data-test-id=\"model-switcher\"] | button[aria-label*=\"模型\"] | button[aria-label*=\"model\"] | button[aria-label*=\"Model\"] | [data-test-id=\"model-picker\"], plus buttons showing a model name) [adapter_version: 0.4.14]",
+    "at": "2026-11-22T19:18:13.715Z"
   }
 ]
