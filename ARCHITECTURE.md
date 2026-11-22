@@ -210,3 +210,11 @@ verify17（0.4.8）回 OK，但思考等级这一步根本没走到：警告是�
 方向键也不管用（verify19：0.4.10 回 OK 但 `applied_thinking` 仍是 低）——鼠标点击、真人式点击、点子元素、聚焦+回车、方向键导航，六种合成输入全试过都不粘。用户让去问老师（Gemini），老师的答案：最可能的原因是内容脚本隔离世界（ISOLATED World）——内容脚本的 `new MouseEvent` 在页面 Angular 代码里 `instanceof window.MouseEvent` 返回 false、直接被丢弃；也可能页面校验了 `isTrusted` 或菜单项依赖真实指针进入才更新内部状态。localStorage/URL 参数/内部 API 都不可行（配置在内存 Service 状态里、刷新会被服务端偏好覆盖；RPC 字段是私有协议常变）；劫持 `addEventListener` 伪造 isTrusted 不推荐（副作用大）。
 
 修法（老师给的方案，原样落地）：改用 CDP `Input.dispatchMouseEvent` 发真实点击（isTrusted 为真）。链路：适配器打开子菜单、找到目标项后，先走注入的 `requestTrustedClick`（内容脚本 `chrome.runtime.sendMessage` 到后台）；后台 service worker 用现成的 `DebuggerManager` attach 到该标签页（`chrome.debugger`，manifest 里早已有 debugger 权限），等 150ms 让调试横幅把视口顶下去、布局稳定，再发 `measure-thinking-item` 让内容脚本量目标项中心坐标（`getBoundingClientRect`，视口 CSS 像素，不乘 devicePixelRatio、不加滚动），然后按 mouseMoved → mousePressed → mouseReleased 三步发 CDP 事件（各隔 40ms），最后 detach。合成点击/键盘/方向键全部保留当后备（CDP 不可用或失败时用，比如 DevTools 正开着、attach 失败）。新增：`DebuggerManager.trustedClick`、`measureThinkingLevelItem`（适配器，暴露给内容脚本）、内容脚本的 `requestTrustedClick`（15 秒超时防挂起）与 `measure-thinking-item` 处理、后台的 `yixiubridge-trusted-click` 处理。Mock 的等级项加 `__trustedClick`（绕过 levelSticks/levelClickDead，直接应用等级，模拟 CDP 真实点击）；FakeElement 加 `getBoundingClientRect`（固定矩形，中心 160,218）。新增测试：合成全无效时 CDP 点击照常选上 `appliedThinking` 为 高、无警告；`trustedClick` 发出 mouseMoved/Pressed/Released 三步且参数正确。211 测试全过。
+
+## 思考等级改精确匹配（v0.4.12）
+
+CDP 真实点击也粘不住（verify23：0.4.11 回 OK 但 `applied_thinking` 仍是 低；verify24 连模型菜单都没打开，`applied_thinking` 为 null）——这时用户把浏览器控制（Muse for Chrome）交给了我，我直接进真机 Gemini 看到了子菜单的真实结构：三项都是 `role="menuitemradio"`（`aria-checked` 判选中），**里面没有任何 radio/input/mat-radio-button**（0.4.8 的前提是错的——项本身就是可点的 menuitemradio），文字是“等级 + 描述”两行：低 快速、高效 / 中 深度适中 / 高 超级详尽，顺序就是 低/中/高；选中态只看 `aria-checked`，未选中项根本没有勾选标记节点。另查实一个关键事实：**思考等级是按对话的**——浏览器直接点的高只在当前对话生效，新对话默认回 低，所以桥每次问答都必须自己能粘住。
+
+根因（这才是 0.4.4 以来全军覆没的真正原因）：等级匹配用子串（`t.indexOf(want) !== -1`）。“高”是“高效”的子串——低的描述是“快速、高效”，找 高 时先匹配到 低，于是每次都点在已选中的 低 上，CDP 点的也是 低（measure 和 click 两处都用子串）。Mock 从没捉住它，因为 mock 的等级项只有名字、没有描述。
+
+修法：新增 `levelLabelOf(el)`——把项文字按空白切词，取首个恰好是 低/中/高 的词（“高效”不是“高”，不会误 match；打勾项前缀的“已选中”也不是等级名）；measure、click、读取选中态三处全改精确匹配；`findLevelClickTarget` 的子元素查找也改精确匹配。Mock 补上真实描述（等级项文字改成“等级 + 描述”）、角色改成 `menuitemradio`；新增回归测试：要 高 时断言 `appliedThinking` 为 高。已证实：旧子串逻辑下 model-select 有 5 个测试失败（新 mock 捉住了它），改精确匹配后 212 测试全过。
