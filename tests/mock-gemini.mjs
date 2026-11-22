@@ -26,6 +26,12 @@ const MOCK_MODELS = [
   { label: '代码和复杂工作', description: '', codename: 'Carbon', selected: false, locked: true },
 ];
 const MOCK_LEVELS = ['低', '中', '高'];
+// Real submenu descriptions (browser inspection, 2026-11-22): the level
+// name is followed by a description, and "高" is a substring of "高效"
+// in 低's description — so a substring match for "高" hits 低 first.
+// The mock MUST carry the descriptions, or the adapter's matching bug
+// (v0.4.12) is invisible in tests.
+const MOCK_LEVEL_DESCS = { '低': '快速、高效', '中': '深度适中', '高': '超级详尽' };
 
 export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], chunkMs = 10, boxKind = 'contenteditable', sendKind = 'mat-icon', keepMenuOpenOnSelect = false, sendOnEnter = false, realStructure = false, priorTurn = null, levelSticks = true, levelClicksToStick = 1, levelRadioInside = false, levelClickDead = false, initialLevel = '高', menuOpensOnClick = 1 } = {}) {
   const doc = new FakeDocument();
@@ -92,7 +98,10 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
       else if (ev.key === 'Enter' || ev.key === ' ') { applyLevelFor(MOCK_LEVELS[focusedIdx]); }
     };
     for (const lv of MOCK_LEVELS) {
-      const item = new FakeElement('div', { role: 'menuitem', 'aria-checked': lv === currentLevel ? 'true' : 'false' });
+      // Real page: level items are menuitemradio with text "<level>
+      // <description>" (e.g. "高 超级详尽"), aria-checked for the
+      // selected one. Unselected items have no children at all.
+      const item = new FakeElement('div', { role: 'menuitemradio', 'aria-checked': lv === currentLevel ? 'true' : 'false' });
       // levelRadioInside: the selectable radio lives INSIDE the menu item
       // and only a click on the radio applies the level — a click on the
       // container does nothing (v0.4.8: verify16 proved 3 full pointer
@@ -103,12 +112,12 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
       const applyLevel = () => applyLevelFor(lv);
       if (levelRadioInside) {
         const radio = new FakeElement('span', { role: 'radio' });
-        radio.textContent = lv;
+        radio.textContent = lv + ' ' + MOCK_LEVEL_DESCS[lv];
         radio.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
         radio.addEventListener('keydown', onLevelKey);
         item.appendChild(radio);
       } else {
-        item.textContent = lv;
+        item.textContent = lv + ' ' + MOCK_LEVEL_DESCS[lv];
         item.addEventListener('click', () => { if (!levelClickDead) applyLevel(); });
       }
       // Arrow-key navigation (v0.4.10) is dispatched on the level item
