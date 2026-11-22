@@ -298,3 +298,34 @@ test('ask without a model keeps the current UI selection (Neon)', async () => {
   assert.equal(res.model, 'gemini-web');
   assert.equal(page.picker.textContent, 'Neon 高');
 });
+
+test('waitForMenuClosed waits for a delayed close and reports false when the budget runs out (v0.4.17)', async () => {
+  // The real page closes the menu with an animation; the adapter must
+  // not read aria-checked until the old overlay is gone. Direct test
+  // of the helper: with the menu open and no close scheduled it returns
+  // false on a short budget, and true once the delayed close runs.
+  const page = createMockGeminiPage({ menuCloseDelayMs: 300 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST });
+  page.picker.click();
+  assert.equal(await adapter.waitForMenuClosed(100), false, 'menu still open, no close scheduled — must report false');
+  page.picker.click(); // toggles close, scheduled 300ms out
+  assert.equal(await adapter.waitForMenuClosed(2000), true, 'menu must report closed once the delayed close runs');
+});
+
+test('selecting 高 reads 高 after a slow-closing menu instead of the stale 低 (v0.4.17)', async () => {
+  // The 2026-11-22 bug, as the user corrected it: the level WAS set to
+  // 高 (they watched new conversations open with 高 selected), but the
+  // adapter kept reporting 低 — because it re-opened the menu and read
+  // aria-checked while the old overlay was still up, and the old nodes
+  // carry the pre-click state forever. The mock closes the menu 3000ms
+  // after the click (animation) and swallows picker clicks mid-close,
+  // so a read before the close returns the stale 低 on every attempt.
+  // The fix waits for the close, reopens, and reads fresh nodes.
+  const page = createMockGeminiPage({ initialLevel: '低', menuCloseDelayMs: 3000 });
+  const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 30000 });
+  const res = await adapter.ask('请只回复：OK', { model: 'Neon', thinking: '高' });
+  assert.equal(res.ok, true, 'expected the ask to succeed, got: ' + JSON.stringify(res));
+  assert.equal(res.appliedThinking, '高', 'the fresh read after the close must report 高, not the stale 低');
+  assert.equal(res.thinkingWarning, undefined, 'no warning: the level stuck on the first attempt');
+  assert.equal(page.levelClickCounts['高'], 1, 'the level must stick on the first attempt — a retry would mean the first read was stale (the retry loop masks it: a later attempt reads fresh after the close lands)');
+});
