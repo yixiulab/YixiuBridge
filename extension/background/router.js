@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.4';
+    this.version = opts.version || '0.4.5';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -48,7 +48,12 @@
   Router.prototype.onAskResult = function (taskId, result) {
     var self = this;
     if (result && result.ok) {
-      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs, adapterVersion: result.adapter_version || null });
+      // The thinking-level fields ride along (v0.4.5): the adapter
+      // reports what it actually used (appliedThinking) and any warning
+      // (thinkingWarning); dropping them here made the runner's done
+      // file report applied_thinking: null with no warning even though
+      // the adapter had computed both (verify13, 2026-11-22).
+      this._setTask(taskId, { status: 'done', answer: result.answer, model: result.model, elapsedMs: result.elapsedMs, adapterVersion: result.adapter_version || null, thinkingWarning: result.thinkingWarning || null, appliedThinking: result.appliedThinking || null });
     } else {
       this._setTask(taskId, { status: 'failed', error: (result && result.error) || 'unknown gemini error', adapterVersion: (result && result.adapter_version) || null });
     }
@@ -282,7 +287,7 @@
 
     var finished = await this._waitForTask(taskId, timeoutMs);
     if (finished.status === 'done') {
-      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId, adapter_version: finished.adapterVersion || null };
+      return { answer: finished.answer, model: finished.model || 'gemini-web', elapsed_ms: finished.elapsedMs, task_id: taskId, adapter_version: finished.adapterVersion || null, thinkingWarning: finished.thinkingWarning || null, appliedThinking: finished.appliedThinking || null };
     }
     if (finished.status === 'failed') {
       // The version tag travels in the error string so it survives the
