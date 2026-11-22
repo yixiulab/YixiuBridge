@@ -26,5 +26,19 @@
     "elapsed_ms": null,
     "error": "ask_gemini failed: ask_gemini: gemini model menu did not open — the picker button may be wrong, or the UI changed [adapter_version: 0.4.1]",
     "at": "2026-11-22T06:14:06.957Z"
+  },
+  {
+    "id": "task-20261122-bridge-042-verify5",
+    "status": "failed",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "answered_model": null,
+    "adapter_version": "0.4.1",
+    "bridge_version": "0.4.1",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "ask_gemini failed: ask_gemini: gemini thinking level did not stick — picker still shows \"Neon\" after choosing level \"高\" [adapter_version: 0.4.1]",
+    "at": "2026-11-22T06:47:32.766Z"
   }
 ]
