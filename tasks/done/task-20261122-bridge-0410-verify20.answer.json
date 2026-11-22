@@ -1,0 +1,15 @@
+{
+  "id": "task-20261122-bridge-0410-verify20",
+  "answer": "天空呈蓝色主要是因为瑞利散射（Rayleigh scattering）现象：\n太阳光是混合光：看似白色的太阳光，实际上由红、橙、黄、绿、蓝、靛、紫等不同波长的可见光组成。\n蓝光更容易被散射：当太阳光进入地球大气层时，会撞击空气中的氮气、氧气等微小气体分子。波长越短的光越容易向四面八方散射，因此波长较短的蓝光散射强度远高于波长较长的红光和黄光，布满了整个天空。\n为什么不是紫色：虽然紫光波长更短、散射更强，但太阳光中紫光本身占比更少，且部分会被大气层吸收；同时人眼对蓝光的敏感度远高于紫光，所以我们最终看到的是蔚蓝色的天空。\n如果想通过动态画面直观了解光波与大气分子的作用过程，可以观看这段简短的视频解析：\n正在生成视频…\n这可能需要几分钟的时间\n想了解为什么日出和日落时天空又会变成红橙色吗？\n是",
+  "model": "gemini-web",
+  "elapsed_ms": 30504,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "applied_thinking": "低",
+  "answered_model": "Neon",
+  "thinking_warning": "gemini thinking level did not stick after 3 attempts — selected level is \"低\" after choosing \"高\"",
+  "adapter_version": "0.4.10",
+  "bridge_version": "0.4.10",
+  "bridge_task_id": "task_mwrmwhr5w4u8q4",
+  "answered_at": "2026-11-22T09:31:34.184Z"
+}
