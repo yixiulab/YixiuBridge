@@ -26,6 +26,8 @@ import {
   acquireLock,
   findExtensionProfile,
   createChromeOpener,
+  ensureWatchdogRegistered,
+  UPDATE_CHECK_INTERVAL_MS,
   EXTENSION_ID,
 } from '../host/muse-runner.mjs';
 
@@ -972,16 +974,21 @@ test('createChromeOpener opens Chrome with the right profile, throttles, and cap
   nowMs += 181000;
   assert.equal((await opener.ensureConnected({ taskId: 't1', log })).opened, true);
   assert.equal(spawns.length, 3);
-  // Fourth attempt for the same task: capped, no more windows.
+  // Fourth attempt for the same task (v0.4.16): NO cap any more — the
+  // runner keeps trying while the task waits (teacher-005: the old cap
+  // let the task sit for ~7 minutes with 0 extensions until the user
+  // double-clicked .bat). The 3-minute throttle still applies.
   nowMs += 181000;
-  const capped = await opener.ensureConnected({ taskId: 't1', log });
-  assert.equal(capped.opened, false);
-  assert.equal(capped.reason, 'max-attempts');
-  assert.equal(spawns.length, 3);
-  // A different task gets its own attempts.
+  const fourth = await opener.ensureConnected({ taskId: 't1', log });
+  assert.equal(fourth.opened, true);
+  assert.equal(spawns.length, 4);
+  assert.ok(logs.some((l) => /第 4 次尝试/.test(l)), 'the log names the attempt number');
+  // A different task gets its own count (after the throttle interval —
+  // the throttle is global, not per task).
+  nowMs += 181000;
   const other = await opener.ensureConnected({ taskId: 't2', log });
   assert.equal(other.opened, true);
-  assert.equal(spawns.length, 4);
+  assert.equal(spawns.length, 5);
 });
 
 test('createChromeOpener does nothing off Windows, and reports a missing profile or chrome.exe instead of spawning', async () => {
@@ -1125,4 +1132,58 @@ test('createBridgeCaller.ask sends thinking in the /call body', async () => {
   assert.equal(sentBody.tool, 'ask_gemini');
   assert.equal(sentBody.params.thinking, '高');
   assert.equal(sentBody.params.model, 'Neon');
+});
+
+// ---------- v0.4.16: poll logging, watchdog registration, 30-min update check ----------
+// teacher-005 (2026-11-22): the runner polled get_answer every 15s for
+// ~9 minutes without writing a single line, and its 3 Chrome-open
+// attempts ran out after ~7 minutes with 0 extensions connected — the
+// task only moved when the user double-clicked .bat.
+
+test('createBridgeCaller logs the poll start and a per-minute summary while polling (v0.4.16)', async () => {
+  let taskCalls = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith('/status')) return jsonResponse({ ok: true, version: '0.3.1', disk_version: '0.3.1', extensions: [{ id: 'p1' }] });
+    if (url.endsWith('/call')) {
+      return jsonResponse({ ok: true, result: { status: 'pending', task_id: 'task_x' } });
+    }
+    if (url.includes('/tasks/task_x')) {
+      taskCalls++;
+      if (taskCalls < 9) return jsonResponse({ status: 'running' });
+      return jsonResponse({ status: 'done', answer: 'slow answer', model: 'Neon', elapsedMs: 9000, adapterVersion: '0.3.1', completedVia: 'stable-while-streaming', streamingFlagStuck: true });
+    }
+    return jsonResponse({}, 404);
+  };
+  const logs = [];
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10, log: (m) => logs.push(m) });
+  const res = await bridge.ask({ prompt: 'slow one', model: 'Neon', timeoutMs: 30000 });
+  assert.equal(res.answer, 'slow answer');
+  assert.equal(res.completedVia, 'stable-while-streaming');
+  assert.equal(res.streamingFlagStuck, true);
+  assert.ok(logs.some((l) => /polling get_answer/.test(l)), 'one entry line when polling starts');
+  assert.ok(logs.filter((l) => /still running \(poll #/.test(l)).length >= 2, 'a summary line every 4th poll (one per minute at the 15s production interval)');
+});
+
+test('ensureWatchdogRegistered spawns the registration detached on Windows only (v0.4.16)', async () => {
+  const spawns = [];
+  const fakeSpawn = (exe, args, opts) => { spawns.push({ exe, args, opts }); return { unref() {} }; };
+  // Off Windows: nothing happens.
+  assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'linux', spawnImpl: fakeSpawn }), false);
+  assert.equal(spawns.length, 0);
+  // On Windows: one detached powershell call with -Register.
+  assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'win32', spawnImpl: fakeSpawn }), true);
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].exe, 'powershell.exe');
+  assert.deepEqual(spawns[0].args.slice(0, 4), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File']);
+  assert.equal(spawns[0].args[4], join('C:\\YixiuBridge', 'scripts', 'watchdog.ps1'));
+  assert.equal(spawns[0].args[5], '-Register');
+  assert.equal(spawns[0].opts.detached, true);
+  // A throwing spawn is swallowed (best-effort) and logged, never throws.
+  const logs = [];
+  assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'win32', spawnImpl: () => { throw new Error('no powershell'); }, log: (m) => logs.push(m) }), false);
+  assert.ok(logs.some((l) => /watchdog registration failed/.test(l)));
+});
+
+test('UPDATE_CHECK_INTERVAL_MS is 30 minutes (v0.4.16)', () => {
+  assert.equal(UPDATE_CHECK_INTERVAL_MS, 30 * 60 * 1000);
 });
