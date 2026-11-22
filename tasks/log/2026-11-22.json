@@ -167,5 +167,20 @@
     "elapsed_ms": 9883,
     "error": null,
     "at": "2026-11-22T08:11:06.754Z"
+  },
+  {
+    "id": "task-20261122-bridge-045-verify14",
+    "status": "done",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": "低",
+    "answered_model": "Neon",
+    "adapter_version": "0.4.5",
+    "bridge_version": "0.4.5",
+    "bridge_task_id": "task_mwrkgwj3uxs1zp",
+    "elapsed_ms": 15431,
+    "error": null,
+    "at": "2026-11-22T08:20:29.611Z"
   }
 ]
