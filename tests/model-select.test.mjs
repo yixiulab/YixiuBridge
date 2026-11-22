@@ -162,6 +162,44 @@ test('ask with a thinking level applies it by walking the submenu with the arrow
   assert.equal(page.picker.textContent, 'Neon 高');
 });
 
+test('ask with a thinking level that synthetic events cannot move applies it by CDP trusted click (v0.4.11)', async () => {
+  // The real page (verify15-19): synthetic clicks, pointer sequences,
+  // inner-radio clicks, focus+Enter and arrow keys all leave the level
+  // on 低. Only a real trusted (CDP) click selects it — the teacher's
+  // answer (2026-11-22). The mock simulates that with levelSticks:false
+  // + levelClickDead:true (nothing synthetic sticks) and a __trustedClick
+  // hook on each level item that applies the level the way a CDP click
+  // does. The fake background messenger also proves measure returns the
+  // item centre for the CDP coordinates.
+  const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, levelSticks: false, levelClickDead: true, initialLevel: '低' });
+  const trustedClickCalls = [];
+  let measured = null;
+  let adapter;
+  const requestTrustedClick = async (want) => {
+    trustedClickCalls.push(want);
+    measured = adapter.measureThinkingLevelItem(want);
+    const items = page.doc.querySelectorAll('[role="menuitem"]');
+    for (const it of items) {
+      if (it.__trustedClick && (it.textContent || '').trim() === want) {
+        it.__trustedClick();
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: 'level item not found for trusted click' };
+  };
+  adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 15000, requestTrustedClick });
+  const res = await adapter.ask('hello', { thinking: '高' });
+  assert.equal(res.ok, true);
+  assert.equal(res.answer, 'ok');
+  assert.equal(res.appliedThinking, '高');
+  assert.equal(res.thinkingWarning, undefined);
+  assert.equal(page.picker.textContent, 'Neon 高');
+  assert.deepEqual(trustedClickCalls, ['高']);
+  assert.equal(measured && measured.ok, true);
+  assert.equal(measured.x, 160, 'centre x of the fixed fake rect (100 + 120/2)');
+  assert.equal(measured.y, 218, 'centre y of the fixed fake rect (200 + 36/2)');
+});
+
 test('ask with a thinking level that does not stick warns and still answers (v0.4.2)', async () => {
   const page = createMockGeminiPage({ chunks: ['ok'], chunkMs: 10, levelSticks: false, initialLevel: '中' });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 15000 });
