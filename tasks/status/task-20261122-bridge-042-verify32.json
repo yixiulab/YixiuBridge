@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-042-verify32",
-  "stage": "sending",
-  "detail": "model Neon, thinking 高",
-  "updated_at": "2026-11-22T20:43:32.771Z",
+  "stage": "waiting",
+  "detail": "task_mwsb1hfpxx460i",
+  "updated_at": "2026-11-22T20:48:33.619Z",
   "stages": [
     {
       "stage": "claimed",
@@ -13,6 +13,11 @@
       "stage": "sending",
       "at": "2026-11-22T20:43:32.771Z",
       "detail": "model Neon, thinking 高"
+    },
+    {
+      "stage": "waiting",
+      "at": "2026-11-22T20:48:33.619Z",
+      "detail": "task_mwsb1hfpxx460i"
     }
   ]
 }
