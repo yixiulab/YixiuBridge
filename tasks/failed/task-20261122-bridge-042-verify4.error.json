@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-bridge-042-verify4",
+  "error": "ask_gemini failed: ask_gemini: gemini model menu did not open — the picker button may be wrong, or the UI changed [adapter_version: 0.4.1]",
+  "adapter_version": "0.4.1",
+  "bridge_version": "0.4.1",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T06:14:05.242Z"
+}
