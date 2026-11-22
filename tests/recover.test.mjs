@@ -270,10 +270,19 @@ test('router recover_last_answer with no Gemini tab errors clearly', async () =>
 
 test('recoverLastAnswer returns the stable answer on a later poll even while the stop button stays up', async () => {
   const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, stopBtnStuck: true, realStructure: true });
-  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 5000, timeoutMs: 300 });
+  // v0.4.17: the ask itself no longer times out at the fixed deadline
+  // while the flag is up — the flexible wait would extend to the 5s
+  // stuck threshold and return the answer directly. To keep this test
+  // about the RECOVER path (ask fails, recovery fetches the answer),
+  // the asker gets a 400ms hard cap so the ask still ends in a
+  // timeout, and the fresh recover adapter then proves the two-poll
+  // rule: first poll refuses (text only just seen), second poll —
+  // after the threshold — returns the answer.
+  const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, stuckStreamingMs: 5000, timeoutMs: 300, activeGraceMs: 300, hardCapMs: 400 });
   const res = await asker.ask('What is 2+2?');
   assert.equal(res.ok, false);
   assert.match(res.error, /did not finish within timeout/);
+  assert.match(res.error, /hard cap reached/);
   // A fresh adapter (like the runner's recover path after the ask
   // failed) with a short stuck threshold: first poll refuses (text only
   // just seen), second poll — after the threshold — returns the answer.
