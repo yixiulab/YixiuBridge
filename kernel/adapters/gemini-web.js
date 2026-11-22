@@ -865,15 +865,21 @@
       if (!btn.el) {
         return { ok: false, error: 'gemini model picker button not found — UI may have changed (tried: ' + SELECTORS.MODEL_PICKER_BUTTON.join(' | ') + ', plus buttons showing a model name)' };
       }
-      try { btn.el.click(); } catch (e) {
-        return { ok: false, error: 'gemini model picker click failed: ' + (e && e.message ? e.message : String(e)) };
+      // The menu sometimes needs a moment (cold tab, slow render) or
+      // swallows the first click: poll for it, click once more, poll
+      // again. Two consecutive real-machine failures (2026-11-22 verify3
+      // and verify4) died here on a single click + one 400ms read.
+      for (var attempt = 0; attempt < 2; attempt++) {
+        try { btn.el.click(); } catch (e) {
+          return { ok: false, error: 'gemini model picker click failed: ' + (e && e.message ? e.message : String(e)) };
+        }
+        for (var i = 0; i < 10; i++) {
+          await sleep(200);
+          var items = readModelMenuItems();
+          if (items.length) return { ok: true, button: btn, items: items };
+        }
       }
-      await sleep(400);
-      var items = readModelMenuItems();
-      if (!items.length) {
-        return { ok: false, error: 'gemini model menu did not open — the picker button may be wrong, or the UI changed' };
-      }
-      return { ok: true, button: btn, items: items };
+      return { ok: false, error: 'gemini model menu did not open — the picker button may be wrong, or the UI changed' };
     }
 
     async function closeModelMenu() {
