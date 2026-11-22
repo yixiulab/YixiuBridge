@@ -86,9 +86,9 @@ function taskJson(id, prompt, extra = {}) {
   return JSON.stringify({ id, prompt, created_by: 'muse', created_at: '2026-11-21T10:00:00.000Z', ...extra });
 }
 
-function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, failBridgeTaskId = null, bridgeTaskId = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1', thinkingWarning = null, appliedThinking = null } = {}) {
+function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = null, failAdapterVersion = null, failBridgeTaskId = null, bridgeTaskId = null, statusUp = true, extensions = 1, version = '0.3.1', diskVersion = '0.3.1', adapterVersion = '0.3.1', thinkingWarning = null, appliedThinking = null, recover = undefined } = {}) {
   const calls = [];
-  return {
+  const bridge = {
     calls,
     async status() { calls.push({ op: 'status' }); return { up: statusUp, extensions, version, diskVersion }; },
     async ask(args) {
@@ -103,6 +103,17 @@ function makeFakeBridge({ answer = 'mock answer', failWith = null, failCode = nu
       return { answer, model: 'Neon', elapsedMs: 1234, adapterVersion, bridgeTaskId, thinkingWarning, appliedThinking };
     },
   };
+  // recover: undefined = no recoverLastAnswer at all (old fake bridges);
+  // a string = recovery returns that answer; null = recovery finds
+  // nothing. (v0.4.13)
+  if (recover !== undefined) {
+    bridge.recoverLastAnswer = async (prompt) => {
+      calls.push({ op: 'recover', prompt });
+      if (recover === null) return null;
+      return { answer: recover, model: 'Neon', elapsedMs: 500, adapterVersion: '0.4.13', bridgeTaskId: null, recovered: true };
+    };
+  }
+  return bridge;
 }
 
 function readRepo(files, path) {
@@ -472,6 +483,93 @@ test('processOneTask success records bridge_task_id in the done file (v0.3.4)', 
 // and nothing in the runner log said so. The runner now logs the bridge
 // version before every ask and the adapter version with the result, and
 // flags a mismatch in plain language.
+
+// ---------- abort + recovery (v0.4.13) ----------
+// Background: teacher-testpc-002/003 (2026-11-22) — the runner's fetch
+// to the bridge aborted at 5 minutes with the bare DOM error "This
+// operation was aborted" and NO task_id, while Gemini had already
+// answered in the tab. The answer was thrown away as a failed file.
+// Two fixes: the fetch no longer aborts before the overall 15-minute
+// cap, and an ask failure now reads the tab once (recover_last_answer)
+// before any failed file is written.
+
+test('createBridgeCaller does not abort the /call fetch before the overall cap', async () => {
+  // The /call fetch only resolves when its signal aborts; the bridge
+  // then answers pending and the task is already done. With the old
+  // abort (min((timeoutS + 90)s, 300s) = 95s for timeoutMs 5000) this
+  // test would hang ~95s; with the 0.4.13 abort (overallCapMs) it
+  // finishes in ~2s.
+  const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith('/call')) {
+      await new Promise((resolve) => {
+        if (opts.signal) opts.signal.addEventListener('abort', resolve);
+        else setTimeout(resolve, 5000);
+      });
+      return jsonResponse({ ok: true, result: { status: 'pending', task_id: 'task_abort' } });
+    }
+    if (url.includes('/tasks/task_abort')) {
+      return jsonResponse({ status: 'done', answer: 'late answer', model: 'Neon', elapsedMs: 2000, adapterVersion: '0.4.13' });
+    }
+    return jsonResponse({}, 404);
+  };
+  const bridge = createBridgeCaller({ bridgeUrl: 'http://127.0.0.1:8765', fetchImpl, pollMs: 10, overallCapMs: 2000 });
+  const res = await bridge.ask({ prompt: 'slow one', model: 'Neon', timeoutMs: 5000 });
+  assert.equal(res.answer, 'late answer');
+  assert.equal(res.bridgeTaskId, 'task_abort');
+});
+
+test('processOneTask recovers the answer after an aborted fetch instead of failing', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'This operation was aborted',
+    recover: 'the answer that was already in the tab',
+  });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.equal(res.recovered, true);
+  const done = readRepo(gh.files, 'tasks/done/t1.answer.json');
+  assert.equal(done.answer, 'the answer that was already in the tab');
+  assert.equal(done.recovered, true, 'the done file must say the answer was recovered, not freshly asked');
+  assert.equal(gh.files.has('tasks/failed/t1.error.json'), false, 'no failed file may be written when recovery succeeds');
+  assert.equal(gh.files.has('tasks/pending/t1.json'), false);
+  assert.ok(bridge.calls.some((c) => c.op === 'recover' && c.prompt === 'q'), 'recovery must be attempted with the task prompt');
+});
+
+test('processOneTask recovers after send did not register', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'gemini send did not register — the prompt is still in the input box after click + Enter [adapter_version: 0.4.13]',
+    failAdapterVersion: '0.4.13',
+    recover: 'recovered answer',
+  });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'done');
+  assert.equal(res.recovered, true);
+  assert.equal(readRepo(gh.files, 'tasks/done/t1.answer.json').answer, 'recovered answer');
+  assert.equal(gh.files.has('tasks/failed/t1.error.json'), false);
+});
+
+test('processOneTask writes failed only when recovery finds nothing', async () => {
+  const gh = makeFakeGitHub({
+    'tasks/pending/t1.json': { content: taskJson('t1', 'q'), sha: 's1' },
+  });
+  const github = createGitHubClient({ token: 'fake-token-for-tests', fetchImpl: gh.fetchImpl });
+  const bridge = makeFakeBridge({
+    failWith: 'This operation was aborted',
+    recover: null,
+  });
+  const res = await processOneTask({ github, bridge, log: () => {} });
+  assert.equal(res.status, 'failed');
+  assert.match(res.error, /aborted/);
+  assert.equal(gh.files.has('tasks/done/t1.answer.json'), false);
+  assert.ok(readRepo(gh.files, 'tasks/failed/t1.error.json'));
+});
 
 test('adapterVersionFromError extracts the version tag, null when absent', () => {
   assert.equal(adapterVersionFromError('ask_gemini: gemini send button not found [adapter_version: 0.2.0]'), '0.2.0');
