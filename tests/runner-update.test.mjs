@@ -51,6 +51,18 @@ function fakeRestarter({ restartResult = { ok: true, skipped: false, killedPids:
   };
 }
 
+function fakePackager({ fail = false } = {}) {
+  const calls = [];
+  return {
+    calls,
+    repackage: async ({ installDir }) => {
+      calls.push(['repackage', installDir]);
+      if (fail) throw new Error('package-extension.mjs exited 1');
+      return { ok: true, skipped: false };
+    },
+  };
+}
+
 async function readRecord(dir) {
   return JSON.parse(await readFile(join(dir, 'last-update.json'), 'utf8'));
 }
@@ -209,5 +221,48 @@ test('writeLastUpdateRecord writes valid JSON with the expected fields', async (
   assert.equal(rec.backupDir, '/tmp/bak');
   assert.equal(rec.error, null);
   assert.ok(rec.checked_at);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('stable update repackages the extension after applying (v0.4.3)', async () => {
+  const dir = await makeDataDir();
+  const updater = fakeUpdater({ updateAvailable: true, stable: true });
+  const restarter = fakeRestarter();
+  const packager = fakePackager();
+  const res = await runIdleOnlineUpdate({
+    dataDir: dir, installDir: '/tmp/install', bridge: fakeBridge(), log: () => {}, updater, restarter, packager,
+  });
+  assert.deepEqual(res, { checked: true, updated: true });
+  assert.deepEqual(packager.calls, [['repackage', '/tmp/install']]);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('repackage failure: rolls back and reports not updated (v0.4.3)', async () => {
+  const dir = await makeDataDir();
+  const updater = fakeUpdater({ updateAvailable: true, stable: true });
+  const restarter = fakeRestarter();
+  const packager = fakePackager({ fail: true });
+  const logs = [];
+  const res = await runIdleOnlineUpdate({
+    dataDir: dir, installDir: '/tmp/install', bridge: fakeBridge(), log: (m) => logs.push(m), updater, restarter, packager,
+  });
+  assert.deepEqual(res, { checked: true, updated: false });
+  assert.ok(updater.calls.some((c) => c[0] === 'rollback'));
+  assert.ok(!restarter.calls.some((c) => c[0] === 'restartBridge'), 'bridge must not restart when packaging failed');
+  const rec = await readRecord(dir);
+  assert.match(rec.error, /打包插件失败/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('restart failure: repackages again after rollback (v0.4.3)', async () => {
+  const dir = await makeDataDir();
+  const updater = fakeUpdater({ updateAvailable: true, stable: true });
+  const restarter = fakeRestarter({ restartResult: { ok: false, skipped: false, error: '桥版本未切换' } });
+  const packager = fakePackager();
+  const res = await runIdleOnlineUpdate({
+    dataDir: dir, installDir: '/tmp/install', bridge: fakeBridge(), log: () => {}, updater, restarter, packager,
+  });
+  assert.deepEqual(res, { checked: true, updated: false });
+  assert.equal(packager.calls.length, 2, 'once after apply, once after rollback');
   await rm(dir, { recursive: true, force: true });
 });
