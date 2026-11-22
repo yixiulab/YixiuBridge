@@ -243,7 +243,33 @@ Mock 同步：`FakeWindow` 补 `MouseEvent`/`PointerEvent`（`clickElement` 的�
 
 测试：恢复的 3 个旧测试改按新行为断言（不匹配时返回 unmatched 而不是拒绝）；runner 新增进度测试（状态文件阶段序列 claimed→sending→done，done 文件带 stages；失败后恢复 unmatched 时阶段为 claimed→sending→retrieving→done，`recovered_unmatched: true`）；模型选择新增“按钮晚出现 300 毫秒也能找到”的重试测试。`taskFilePaths` 新增 `status` 一项。
 
+## 效率修复：答案一完就取 + 自动重连 + 看门狗 + 轮询日志（v0.4.16）
+
+证据：teacher-005（2026-11-22，Neon，思考高）：21:05:45 runner 取走，21:05:46 开始问；问的那通 5 分 01 秒才返回 pending（21:10:47），然后 runner 每 15 秒轮询 `get_answer`，到 21:19 还没取到——答案在标签页里早就完了；最后跑满 900 秒总预算才靠恢复取回来。runner 日志（用户 21:14 发来）还显示：19:58:59Z→20:05:06Z 桥上 0 个扩展连着，runner 每分钟查、任务一直留着，自动开 Chrome 试了 3 次（每次隔 3 分钟）就停了；21:05:44 用户双击 .bat 后旧 runner（pid 37016）已死、新 runner 接管，桥上立刻 2 个扩展，任务马上取走。用户原话（21:05）：“要先知道为什么它会卡住，把这个问题给它解决掉。然后提高效率。”
+
+根因就一条：完成检测的“流式标志”会残留。适配器要求停止按钮消失 **且** 文本 2 秒不变才算完成；长回答文本早完了，停止按钮/thinking-dots 还挂着，于是问超时、轮询取不到（路由器里的任务一直是 running）、恢复也拒绝——三条路被同一个残留标志堵死。
+
+改法（六件，按用户定的顺序）：
+
+1. **文本稳定即完成**：`waitForCompletion` 的稳定计时不再被流式标志重置——文本连续 `stuckStreamingMs`（默认 10 秒，可配）不变就判完成，即使停止按钮还挂着，返回 `completedVia: 'stable-while-streaming'` + `streamingFlagStuck: true`；原来“标志消失 + 文本 2 秒不变”的快路径不动（`completedVia: 'stable'`），短回答直接返回不受影响。超时错误现在写明卡在哪一环（发送核查吃掉了预算 / 还没等到文本 / 文本还在变 / 流式标志挂着、文本已稳定 X 秒、还差 Y 秒）。`recoverLastAnswer` 用同一套判定：同一元素的文本稳定够久就取（第一次见到只记下时间、仍拒绝，真的在流式绝不早取）；新旧轮次同文本不会串（稳定性按元素 + 文本键入）。`completedVia` / `streamingFlagStuck` 沿适配器 → 内容脚本 → 路由器 → runner 全程直通，runner 只记日志——done 文件不加字段（文件结构不变）。
+
+2. **插件自动重连**：(a) service worker 每分钟的 keep-alive 增加两件事：SSE 心跳——桥每 15 秒发一次 `: ping`，45 秒（3 个心跳）没动静就 `stop()` + `connect()`（旧逻辑只在 `connected === false` 时才连；worker 挂起后 `connected` 恒 true，这正是桥重启后 0 扩展 7 分钟没人管的原因）；Gemini 标签页自愈——ping 内容脚本，旧版/不答就重载（任务进行中不碰、5 分钟内不重复、没有标签页不新建；重载不用重注——重注会注册第二个 onMessage 监听，问会被处理两次）。(b) 桥客户端加 generation 守卫：`stop()` + `connect()` 时旧循环醒来发现代号不符就退出，绝不留下两个 SSE 循环（测试证实：没守卫时旧循环会多取一次流）。(c) runner 自动开 Chrome 的每任务 3 次上限取消：任务还在等就一直试，3 分钟节流不变，尝试次数只记日志（map 限 100 条防无限增长）。
+
+3. **看门狗**：新 `scripts/watchdog.ps1`（**纯 ASCII**——测试电脑脚本 saga 证明中文 .ps1 会被 PowerShell 5.1 当 ANSI 读错），由 runner 启动时（`ensureWatchdogRegistered`，win32 专用、detached、不等结果）与 `update-and-start.ps1` 步骤 6 各顺带注册一次（`Register-ScheduledTask -Force`，幂等；失败只记日志，绝不拖垮主流程）。计划任务 `YixiuBridgeWatchdog` 每 3 分钟跑一次：心跳文件 3 分钟内新鲜就什么都不做；过期就读锁文件 PID，用 CIM 查命令行确认是 muse-runner 才停掉（防误杀别的 node 进程），再以最小化窗口重起 runner；只记动作与错误到 `~/.yixiubridge/muse-watchdog.log`，安静检查不写日志。心跳过期就判卡死是有依据的：健康 runner 的心跳定时器每 30 秒跑一次，哪怕 15 分钟问答进行中事件循环也是空闲的，过期 3 分钟就是真卡死。没配好 config.json 的机器不启动 runner（防每 3 分钟重启一个立刻退出的进程）。
+
+4. **轮询写日志**：`createBridgeCaller` 接 `log` 参数（默认空操作）；进轮询记一行（间隔与总预算），每 4 次轮询（生产 15 秒间隔 = 每分钟）汇总一行（第几次、已过多长时间）；恢复每次尝试记一行（带适配器给的未完成原因——流式标志还是文本在变、已稳定多久）；done 日志行标出“流式标志残留、按稳定文本取的答案”。量级：一次问答正常只多 1–2 行，恢复失败路径最多 20 行（5 分钟轮询）。
+
+5. **更新检查改 30 分钟**：`UPDATE_CHECK_INTERVAL_MS` 2 分钟 → 30 分钟（下面的计划节已完成，条件满足：0.4.15 的进度功能已在 teacher-005 真机上证实可用）。
+
+6. **版本与记账**：0.4.16 全套版本号 + 打包 + 全量测试 250/250；builds.json 加 0.4.16（stable，verified_by_muse false）；STABLE.md 指针改到 0.4.16；README 路线图加一行。
+
+测试：适配器新增 4 个（标志残留时约 2 秒取到答案并标 `stable-while-streaming`；正常标志消失仍是 `stable`；超时错误点名流式标志 + 残留规则；文本持续变化时报“文本还在变”——注意 `sendCheckMs` 默认 1000 毫秒，短超时测试必须显式传小值，否则发送核查先吃光预算）；恢复新增 2 个（新适配器首轮拒绝、次轮取到残留标志下的稳定答案；同适配器晚启动 baseline 路径同样取到）；路由器新增 1 个（完成字段直通）；桥客户端新增 2 个（第二次 connect 取代第一次，不多取流；stop 后重连正常）；runner 新增 3 个（轮询日志行 + 完成字段直通；看门狗注册的调用形状与 best-effort；更新检查 30 分钟）。另修 1 个旧测试：Chrome 自动开第 4 次不再封顶（加 181 秒时钟推进避开全局节流）。
+
+未在真机上验（verified_by_muse 保持 false）：看门狗的 PowerShell 本身（本机没有 PowerShell，只能验 ASCII 与逻辑，Windows 真机是唯一验证）；service worker 的心跳检测与标签页自愈（无 Chrome 环境可测）；残留标志规则在真实长回答上的表现（mock 已证实形状，真实 Gemini 的停止按钮残留时长未知——10 秒阈值是按 teacher-005 的“答案完后几分钟仍挂着”取的，偏保守）。
+
 ## 计划：更新检查改 30 分钟（v0.4.16，待 0.4.15 真机验证通过后做）
+
+**已完成（v0.4.16）**：0.4.15 的进度功能已在 teacher-005 真机上证实可用（2026-11-22 21:05，claimed→sending→waiting→retrieving→done 五步全跑通），`UPDATE_CHECK_INTERVAL_MS` 已改成 30 分钟。
 
 2026-11-22 20:55 用户定：0.4.15 还没在真机上测过，等测完、没问题的话，0.4.16 把 runner 空闲更新检查
 `UPDATE_CHECK_INTERVAL_MS` 从 2 分钟改成 30 分钟。2 分钟是测试时才设的（用户 2026-11-22 09:27 建议，
