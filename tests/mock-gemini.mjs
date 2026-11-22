@@ -115,6 +115,17 @@ export function createMockGeminiPage({ chunks = ['4', ' is ', 'the answer.'], ch
       // itself, so the item always carries the key handler (the radio
       // carries it too for the focus+Enter path).
       item.addEventListener('keydown', onLevelKey);
+      // __trustedClick (v0.4.11): simulates a real CDP trusted click
+      // (Input.dispatchMouseEvent, isTrusted true). It applies the level
+      // directly, bypassing the levelSticks / levelClickDead gates that
+      // make synthetic clicks and keys fail — exactly the real page's
+      // behaviour (verify15-19): synthetic events never move the level,
+      // only a real trusted click does.
+      item.__trustedClick = () => {
+        currentLevel = lv;
+        picker.textContent = pickerText();
+        closeMenu();
+      };
       submenu.appendChild(item);
     }
     doc.body.appendChild(submenu);
