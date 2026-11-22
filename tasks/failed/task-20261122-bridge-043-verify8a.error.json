@@ -1,0 +1,9 @@
+{
+  "id": "task-20261122-bridge-043-verify8a",
+  "error": "ask_gemini failed: Gemini content script is still an old version after reloading the tab — reload the extension in chrome://extensions (it should show 0.4.2) and try again",
+  "adapter_version": null,
+  "bridge_version": "0.4.2",
+  "bridge_task_id": null,
+  "asked_thinking": "高",
+  "failed_at": "2026-11-22T07:38:28.697Z"
+}
