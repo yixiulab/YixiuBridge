@@ -32,14 +32,20 @@ test('recoverLastAnswer returns the latest answer after a successful ask', async
   assert.equal(rec.recovered, true);
 });
 
-test('recoverLastAnswer refuses when the prompt was never sent (stale previous answer)', async () => {
-  // realStructure pages start with a prior turn already answered, so a
-  // naive "latest response" read would return that old answer.
+test('recoverLastAnswer returns the latest answer flagged unmatched when the prompt was never sent (v0.4.15)', async () => {
+  // v0.4.15 (teacher-003, 2026-11-22): the prompt never left the box
+  // (picker button not found) but the user can SEE a long answer in
+  // the tab and wants it back. Recovery now returns the latest
+  // COMPLETE answer flagged unmatched, instead of refusing — the
+  // caller (runner) records recovered_unmatched so the reader knows
+  // it was not verified against this prompt.
   const page = createMockGeminiPage({ chunks: ['new'], chunkMs: 10, realStructure: true });
   const adapter = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   const rec = adapter.recoverLastAnswer('a brand new question nobody asked');
-  assert.equal(rec.ok, false);
-  assert.match(rec.error, /never sent/);
+  assert.equal(rec.ok, true);
+  assert.equal(rec.unmatched, true);
+  assert.equal(rec.recovered, true);
+  assert.ok(rec.answer && rec.answer.length > 0);
 });
 
 test('recoverLastAnswer refuses after a send failure — nothing new appeared', async () => {
@@ -79,9 +85,12 @@ test('recoverLastAnswer without a stored ask falls back to the user-query match'
   const rec = fresh.recoverLastAnswer('What is 2+2?');
   assert.equal(rec.ok, true);
   assert.equal(rec.answer, '4 is the answer.');
+  // v0.4.15: a question nobody asked no longer refuses — the latest
+  // answer comes back flagged unmatched (the caller discloses it).
   const miss = fresh.recoverLastAnswer('a question nobody asked');
-  assert.equal(miss.ok, false);
-  assert.match(miss.error, /never sent/);
+  assert.equal(miss.ok, true);
+  assert.equal(miss.unmatched, true);
+  assert.equal(miss.answer, '4 is the answer.');
 });
 
 // ---------- prompt rendering tolerance (v0.4.14) ----------
@@ -129,18 +138,21 @@ test('recoverLastAnswer matches when the page shows only the first 40 chars of t
   assert.equal(rec.answer, '4 is the answer.');
 });
 
-test('recoverLastAnswer still refuses a different question after rendering changes', async () => {
+test('recoverLastAnswer returns the latest answer flagged unmatched for a different question (v0.4.15)', async () => {
   const page = createMockGeminiPage({ chunks: ['4', ' is ', 'the answer.'], chunkMs: 10, realStructure: true });
   const asker = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   const res = await asker.ask(LONG_PROMPT);
   assert.equal(res.ok, true);
   // Same rendering quirks, but the latest turn is a different question:
-  // the tolerant checks must not conjure a match out of it.
+  // v0.4.15 no longer refuses — the latest answer comes back flagged
+  // unmatched, so the reader knows it was not verified against the
+  // requested prompt.
   latestQueryLine(page).textContent = '你说：请把老师关于意大利小镇故事的那份选题清单再发一遍，包括庞贝和古罗马人的一天。';
   const fresh = Adapter.createAdapter(page.doc, { win: page.win, ...FAST, timeoutMs: 5000 });
   const rec = fresh.recoverLastAnswer(LONG_PROMPT);
-  assert.equal(rec.ok, false);
-  assert.match(rec.error, /never sent/);
+  assert.equal(rec.ok, true);
+  assert.equal(rec.unmatched, true);
+  assert.equal(rec.answer, '4 is the answer.');
 });
 
 test('ask recovers the late answer when the send checks misjudge a slow page', async () => {
