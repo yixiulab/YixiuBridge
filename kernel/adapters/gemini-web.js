@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.9';
+  var ADAPTER_VERSION = '0.4.10';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1065,7 +1065,7 @@
     // event sequence (pointerdown, mousedown, pointerup, mouseup, click).
     // A bare el.click() only dispatches 'click'; the thinking-level
     // submenu items ignore it — verify15 proved 3 plain clicks leave
-    // the checkmark on 低 (v0.4.9 retry did not help). Falls back to
+    // the checkmark on 低 (v0.4.10 retry did not help). Falls back to
     // el.click() when the window has no MouseEvent (tests).
     function clickElement(el) {
       if (!el) return false;
@@ -1140,6 +1140,40 @@
       return false;
     }
 
+    // Navigate to a level with the arrow keys, the way a keyboard user
+    // does: focus the currently-checked item, press ArrowDown/ArrowUp to
+    // walk to the wanted item, press Enter. The user pointed out the
+    // submenu defaults to the first item and 高 is two downs away —
+    // arrow-key navigation uses the menu's own focus movement instead of
+    // trying to click or focus a specific element. The item order is
+    // read from the live DOM (levels[]), not assumed, so it works
+    // whatever order the page lists the levels in. Returns false when
+    // the window has no KeyboardEvent.
+    function navigateToLevelByArrows(levels, wantIdx) {
+      if (!levels || !levels.length || wantIdx < 0 || wantIdx >= levels.length) return false;
+      if (typeof win.KeyboardEvent !== 'function') return false;
+      var startIdx = 0;
+      for (var i = 0; i < levels.length; i++) {
+        if (levels[i].selected) { startIdx = i; break; }
+      }
+      var startEl = levels[startIdx].el;
+      try {
+        if (typeof startEl.focus === 'function') startEl.focus();
+      } catch (e) { /* focus is best-effort */ }
+      var steps = wantIdx - startIdx;
+      var key = steps >= 0 ? 'ArrowDown' : 'ArrowUp';
+      var n = Math.abs(steps);
+      try {
+        for (var s = 0; s < n; s++) {
+          startEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: key, code: key, bubbles: true, cancelable: true }));
+          startEl.dispatchEvent(new win.KeyboardEvent('keyup', { key: key, code: key, bubbles: true, cancelable: true }));
+        }
+        startEl.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+        startEl.dispatchEvent(new win.KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true }));
+        return true;
+      } catch (e) { return false; }
+    }
+
     // Open the model menu, open the 思考等级 submenu, click the given
     // level item. Returns { ok: true } or an error object (invalid-level
     // when the level is not in the menu, apply-failed otherwise).
@@ -1161,7 +1195,9 @@
       await sleep(400);
       var levelItems = readModelMenuItems();
       var foundLevels = [];
+      var levels = [];
       var match = null;
+      var wantIdx = -1;
       for (var j = 0; j < levelItems.length; j++) {
         var m = parseModelItem(levelItems[j]);
         if (m.codename) continue; // a model item, not a level
@@ -1169,22 +1205,26 @@
         var t = textOf(levelItems[j]).trim();
         if (t.indexOf('思考') !== -1) continue; // the trigger itself
         foundLevels.push(t);
-        if (!match && (t === want || t.indexOf(want) !== -1)) match = levelItems[j];
+        levels.push({ el: levelItems[j], label: t, selected: !!m.selected });
+        if (!match && (t === want || t.indexOf(want) !== -1)) { match = levelItems[j]; wantIdx = levels.length - 1; }
       }
       if (!match) {
         await closeModelMenu();
         return { ok: false, code: 'invalid-level', error: 'gemini thinking level "' + want + '" not found — available levels: ' + (foundLevels.join(', ') || 'none') };
       }
       var target = findLevelClickTarget(match, want);
-      // Activation alternates by attempt: 1st and 3rd try the keyboard
-      // (a different input path — synthetic mouse clicks are ignored by
-      // the real page), 2nd keeps the mouse click as a fallback.
+      // Activation alternates by attempt: 1st and 3rd walk the menu with
+      // the arrow keys (the user's method — the submenu defaults to the
+      // first item, 高 is two downs away), 2nd focuses the item and
+      // presses Enter (v0.4.10), mouse click kept as a last fallback.
       var activated;
       if ((attempt || 0) % 2 === 0) {
-        activated = activateLevelByKeyboard(target);
+        activated = navigateToLevelByArrows(levels, wantIdx);
+        if (!activated) activated = activateLevelByKeyboard(target);
         if (!activated) activated = clickElement(target);
       } else {
-        activated = clickElement(target);
+        activated = activateLevelByKeyboard(target);
+        if (!activated) activated = clickElement(target);
       }
       if (!activated) {
         await closeModelMenu();
@@ -1204,7 +1244,7 @@
     // Verification (v0.4.4) reads the submenu's checked item via
     // readSelectedThinkingLevel — never the picker button text, which
     // misreported 高 in verify11 while the submenu showed 低.
-    // Retry (v0.4.9): the real page sometimes swallows the first click
+    // Retry (v0.4.10): the real page sometimes swallows the first click
     // on a submenu item (same quirk as the model menu's first click,
     // v0.4.2) — verify14 proved a single click leaves the checkmark on
     // 低. So click, verify, and retry up to 3 times before giving up.
@@ -1323,7 +1363,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.9: read from the
+        // carries the ACTUALLY applied level (v0.4.10: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
