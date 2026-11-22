@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.12';
+  var ADAPTER_VERSION = '0.4.13';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -348,6 +348,16 @@
     // item. Absent in tests and when the background cannot do CDP — the
     // adapter then falls back to the synthetic chain.
     var requestTrustedClick = opts.requestTrustedClick || null;
+    // requestTrustedSendClick() -> Promise<{ok} | {ok:false, error}>.
+    // Same CDP trusted-click path, aimed at the SEND button instead
+    // (v0.4.13, teacher-001: click + Enter both missed on the real
+    // page). Injected by the content script; absent in tests.
+    var requestTrustedSendClick = opts.requestTrustedSendClick || null;
+    // The most recent ask's prompt + response baseline, for
+    // recoverLastAnswer: it proves whether anything NEW appeared since
+    // this ask started, so a previous turn's answer is never returned
+    // as this turn's.
+    var lastAsk = null;
 
     function findPromptBox() {
       return queryFirst(doc, SELECTORS.PROMPT_BOX);
@@ -784,6 +794,91 @@
         if (!found || baseText !== t) out.push(t);
       }
       return out;
+    }
+
+    // All user-query turns on the page, in document order (real page:
+    // <user-query> per turn; fallback to the inner query-text lines).
+    // Used by recoverLastAnswer to prove the prompt really left the box.
+    function getUserQueryTexts() {
+      var els = queryAll(doc, ['user-query']);
+      if (!els.length) els = queryAll(doc, ['.query-text-line']);
+      var out = [];
+      for (var i = 0; i < els.length; i++) {
+        var t = textOf(els[i]);
+        if (t) out.push(t);
+      }
+      return out;
+    }
+
+    // Read the latest COMPLETE answer already in the tab, without asking
+    // again (v0.4.13). This is the recovery path for the 2026-11-22
+    // teacher-testpc saga: Gemini had answered in the tab, but the
+    // runner's fetch aborted (or the send check misjudged) and the
+    // answer was thrown away as a failed file. It only returns an
+    // answer when the prompt genuinely left the box:
+    //   - with a baseline (the normal case: this adapter instance just
+    //     ran the ask), the answer must be NEW or CHANGED since the
+    //     baseline captured before the prompt was filled — a previous
+    //     turn's text can never qualify;
+    //   - without a baseline, the latest user-query turn must carry the
+    //     prompt text.
+    // A still-streaming answer is refused (it is not complete yet; the
+    // in-flight ask will deliver it via the task store). Returns
+    // { ok:true, answer, recovered:true } or { ok:false, error }.
+    // NOTE: a verbatim repeat of the immediately previous prompt is
+    // ambiguous — the latest user query matches, so the previous turn's
+    // answer could be returned. The baseline path (the one the runner
+    // actually uses) is not affected: a repeat ask creates a NEW
+    // response element, so only the new turn counts as live.
+    function recoverLastAnswer(prompt, baseline) {
+      var p = String(prompt || '').trim();
+      var base = baseline || (lastAsk && lastAsk.prompt === p ? lastAsk.baseline : null);
+      if (base) {
+        // Streaming first: a stream that just started has no text yet,
+        // so the live check alone would misreport "no new response"
+        // instead of "still streaming".
+        if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
+        var live = getLiveResponses(base);
+        if (!live.length) return { ok: false, error: 'recover: no new response appeared since the ask started' };
+        return { ok: true, answer: live[live.length - 1], recovered: true };
+      }
+      var queries = getUserQueryTexts();
+      var q = queries.length ? queries[queries.length - 1] : '';
+      if (!p || !q || q.indexOf(p.slice(0, 60)) === -1) {
+        return { ok: false, error: 'recover: no user query matching the prompt — the prompt was never sent' };
+      }
+      if (isStreaming()) return { ok: false, error: 'recover: answer still streaming' };
+      var latest = getLatestResponseText();
+      if (!latest) return { ok: false, error: 'recover: no model answer in the tab' };
+      return { ok: true, answer: latest, recovered: true };
+    }
+
+    // Poll recoverLastAnswer for up to budgetMs: a slow page may start
+    // streaming just after the send checks gave up. Returns the first
+    // successful recovery, or the last failure.
+    async function pollRecover(prompt, baseline, budgetMs) {
+      var deadline = Date.now() + (budgetMs || 1000);
+      var last = recoverLastAnswer(prompt, baseline);
+      while (!last.ok && Date.now() < deadline) {
+        await sleep(200);
+        last = recoverLastAnswer(prompt, baseline);
+      }
+      return last;
+    }
+
+    // Measure the send button's viewport centre (CSS pixels) for a CDP
+    // trusted click (v0.4.13, same pattern as measureThinkingLevelItem).
+    // The background attaches the debugger first, so the coordinates
+    // already account for the debug infobar's viewport shift.
+    function measureSendButton() {
+      var box = findPromptBox();
+      if (!box.el) return { ok: false, error: 'measure-send-button: prompt box not found' };
+      var send = findSendButton(box.el);
+      if (!send.el) return { ok: false, error: 'measure-send-button: send button not found' };
+      var r = null;
+      try { r = (typeof send.el.getBoundingClientRect === 'function') ? send.el.getBoundingClientRect() : null; } catch (e) { r = null; }
+      if (!r) return { ok: false, error: 'measure-send-button: send button has no bounding rect' };
+      return { ok: true, x: r.left + r.width / 2, y: r.top + r.height / 2 };
     }
 
     // ---------- model selection (v0.2) ----------
@@ -1463,7 +1558,18 @@
         // against this, so pre-existing page text (home screen, previous
         // turn) can never be reported as this turn's answer (task -006).
         var baseline = captureResponseBaseline();
+        // Remember this ask for recoverLastAnswer: the baseline is the
+        // proof of what is new, so a previous turn's answer can never
+        // be returned as this turn's (v0.4.13).
+        lastAsk = { prompt: String(prompt), baseline: baseline };
         fillPromptBox(box.el, String(prompt), win);
+        // A menu left open (e.g. by model/thinking selection) can cover
+        // the send button or swallow the click — close it and let the
+        // DOM settle before looking for the button (v0.4.13).
+        if (readModelMenuItems().length) {
+          await closeModelMenu();
+          await sleep(300);
+        }
         // Verify the message actually left the box: a click can land on a
         // decoy button, or the page can ignore it. Sent = streaming
         // started, or the box cleared, or a NEW genuine model response
@@ -1483,7 +1589,17 @@
           if (getLiveResponses(baseline).length) return true;
           return false;
         };
+        // Send attempts, in order, each verified with confirmSent
+        // (v0.4.13, teacher-testpc-001): a single click + Enter is NOT
+        // enough — on the real page both missed and the prompt sat in
+        // the box, yet the bridge reported the failure while the answer
+        // was already in the tab. So: focus the box first, then try
+        // plain click, Enter, a CDP trusted click on the send button,
+        // and a full pointer sequence — and only then, before failing,
+        // poll recoverLastAnswer briefly, in case the send actually
+        // worked while confirmSent misjudged a slow page.
         var send = findSendButton(box.el);
+        var recoveredOut = null;
         if (!send.el) {
           // No button matched at all. The visible blue arrow may be a
           // div/custom element or live in a shadow root (task -005: the
@@ -1492,38 +1608,75 @@
           // indistinguishable from a button click once the answer streams.
           dispatchEnter(box.el, win);
           if (!(await confirmSent())) {
-            var dump = nearbyButtonsDump(box.el);
-            var tried = 'icon [data-mat-icon-name*="arrow_up"] -> closest button'
-              + ' | ' + SELECTORS.SEND_BUTTON.join(' | ')
-              + ' | ' + SELECTORS.SEND_BUTTON_BROAD.join(' | ')
-              + ' | role=button + send-like text | button svg arrow icon';
-            var err = 'gemini send button not found — Enter fallback also did not send the prompt (tried: ' + tried + ')';
-            if (dump.total) {
-              err += ' Buttons near the prompt box (' + dump.total + ' total, nearest first): ' + dump.lines.join(' | ');
+            var rec = await pollRecover(prompt, baseline, 1000);
+            if (rec.ok) {
+              recoveredOut = { ok: true, answer: rec.answer, model: selectedModel || DEFAULTS.model, elapsedMs: Date.now() - startedAt, recovered: true };
             } else {
-              err += ' No buttons found in the page at all.';
+              var dump = nearbyButtonsDump(box.el);
+              var tried = 'icon [data-mat-icon-name*="arrow_up"] -> closest button'
+                + ' | ' + SELECTORS.SEND_BUTTON.join(' | ')
+                + ' | ' + SELECTORS.SEND_BUTTON_BROAD.join(' | ')
+                + ' | role=button + send-like text | button svg arrow icon';
+              var err = 'gemini send button not found — Enter fallback also did not send the prompt (tried: ' + tried + ')';
+              if (dump.total) {
+                err += ' Buttons near the prompt box (' + dump.total + ' total, nearest first): ' + dump.lines.join(' | ');
+              } else {
+                err += ' No buttons found in the page at all.';
+              }
+              err += ' Send-arrow icon ancestors: ' + iconAncestorChain();
+              err += ' Recovery checked the tab and found no new answer (' + rec.error + ').';
+              return { ok: false, error: err };
             }
-            err += ' Send-arrow icon ancestors: ' + iconAncestorChain();
-            return { ok: false, error: err };
           }
         } else {
           if (send.el.disabled) {
             return { ok: false, error: 'gemini send button is disabled — the prompt may not have registered, or a previous answer is still running' };
           }
+          // The input box must hold focus before sending: a click that
+          // lands while the box is unfocused can be swallowed. Focus
+          // itself is synchronous — no settle sleep: the send checks
+          // below already wait sendCheckMs, and a sleep here would
+          // delay the first click past the streaming start.
+          try { if (typeof box.el.focus === 'function') box.el.focus(); } catch (e) { /* focus is best-effort */ }
+          var sent = false;
           try { send.el.click(); } catch (e) {
             return { ok: false, error: 'gemini send button click failed: ' + (e && e.message ? e.message : String(e)) };
           }
-          // If the click did not send, retry with Enter; if that also
-          // fails, fail fast with a clear error instead of waiting out
-          // the whole timeout for a message that was never sent.
-          var sent = await confirmSent();
+          sent = await confirmSent();
           if (!sent) {
             dispatchEnter(box.el, win);
             sent = await confirmSent();
           }
-          if (!sent) {
-            return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed.' };
+          if (!sent && requestTrustedSendClick) {
+            // CDP trusted click (Input.dispatchMouseEvent, isTrusted):
+            // the same real-click path that fixed the thinking-level
+            // items (v0.4.11) — synthetic events are ignored by this
+            // page, a trusted click is not.
+            try {
+              var tc = await requestTrustedSendClick();
+              if (tc && tc.ok) sent = await confirmSent();
+            } catch (e) { /* trusted click unavailable — fall through */ }
           }
+          if (!sent) {
+            // Full pointer sequence (pointerdown ... click): the page
+            // honours a user-like sequence where a bare click is ignored
+            // (same lesson as the thinking-level items, verify15).
+            clickElement(send.el);
+            sent = await confirmSent();
+          }
+          if (!sent) {
+            var rec2 = await pollRecover(prompt, baseline, 1000);
+            if (rec2.ok) {
+              recoveredOut = { ok: true, answer: rec2.answer, model: selectedModel || DEFAULTS.model, elapsedMs: Date.now() - startedAt, recovered: true };
+            } else {
+              return { ok: false, error: 'gemini send did not register — the prompt is still in the input box after click + Enter + trusted click + pointer sequence (send button matched: ' + (send.selector || 'unknown') + '). The UI may have changed. Recovery checked the tab and found no new answer (' + rec2.error + ').' };
+            }
+          }
+        }
+        if (recoveredOut) {
+          if (appliedThinking) recoveredOut.appliedThinking = appliedThinking;
+          if (thinkingWarning) recoveredOut.thinkingWarning = thinkingWarning;
+          return recoveredOut;
         }
         var done = await waitForCompletion(startedAt, deadline, baseline);
         if (!done.ok) return done;
@@ -1564,6 +1717,8 @@
       selectModel: selectModel,
       selectThinkingLevel: selectThinkingLevel,
       measureThinkingLevelItem: measureThinkingLevelItem,
+      measureSendButton: measureSendButton,
+      recoverLastAnswer: recoverLastAnswer,
       waitForCompletion: waitForCompletion,
       ask: ask,
     };
