@@ -347,5 +347,20 @@
     "elapsed_ms": null,
     "error": "ask_gemini task task_mwrq29kt2v36yu did not finish within 900s — poll get_answer with task_id task_mwrq29kt2v36yu for the result",
     "at": "2026-11-22T11:11:49.560Z"
+  },
+  {
+    "id": "task-20261122-bridge-0412-verify26",
+    "status": "failed",
+    "prompt": "请只回复：OK",
+    "asked_model": "Neon",
+    "asked_thinking": "高",
+    "applied_thinking": null,
+    "answered_model": null,
+    "adapter_version": "0.4.12",
+    "bridge_version": "0.4.12",
+    "bridge_task_id": null,
+    "elapsed_ms": null,
+    "error": "ask_gemini failed: ask_gemini: gemini model picker button not found — UI may have changed (tried: button[data-test-id=\"model-switcher\"] | button[aria-label*=\"模型\"] | button[aria-label*=\"model\"] | button[aria-label*=\"Model\"] | [data-test-id=\"model-picker\"], plus buttons showing a model name) [adapter_version: 0.4.12]",
+    "at": "2026-11-22T11:56:04.210Z"
   }
 ]
