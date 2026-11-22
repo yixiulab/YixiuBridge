@@ -504,24 +504,37 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
   // on a genuine task failure or when the cap runs out. Every throw
   // carries e.bridgeTaskId so the failed file can name the bridge task
   // for a later get_answer (v0.3.4).
+  // Status is checked BEFORE the deadline (v0.4.13): a task that
+  // finishes exactly as the cap runs out is still an answer, not a
+  // timeout — the same "answer in the tab, thrown away" bug class as
+  // the aborted fetch below.
   async function pollTask(taskId, deadlineMs, capMs) {
     for (;;) {
-      if (Date.now() >= deadlineMs) {
-        const e = new Error('ask_gemini task ' + taskId + ' did not finish within ' + Math.round(capMs / 1000) + 's — poll get_answer with task_id ' + taskId + ' for the result');
-        e.bridgeTaskId = taskId;
-        throw e;
-      }
-      await sleep(pollMs);
       let t;
       try {
         const res = await fetchImpl(bridgeUrl + '/tasks/' + encodeURIComponent(taskId));
-        if (!res.ok) continue;
+        if (!res.ok) {
+          if (Date.now() >= deadlineMs) {
+            const e = new Error('ask_gemini task ' + taskId + ' did not finish within ' + Math.round(capMs / 1000) + 's — poll get_answer with task_id ' + taskId + ' for the result');
+            e.bridgeTaskId = taskId;
+            throw e;
+          }
+          await sleep(pollMs);
+          continue;
+        }
         t = await res.json();
       } catch (e) {
+        if (e && e.bridgeTaskId) throw e;
+        if (Date.now() >= deadlineMs) {
+          const err = new Error('ask_gemini task ' + taskId + ' did not finish within ' + Math.round(capMs / 1000) + 's — poll get_answer with task_id ' + taskId + ' for the result');
+          err.bridgeTaskId = taskId;
+          throw err;
+        }
+        await sleep(pollMs);
         continue;
       }
       if (t.status === 'done') {
-        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, appliedThinking: t.appliedThinking || null, bridgeTaskId: taskId };
+        return { answer: t.answer, model: t.model || 'gemini-web', elapsedMs: t.elapsedMs || null, adapterVersion: t.adapterVersion || null, thinkingWarning: t.thinkingWarning || null, appliedThinking: t.appliedThinking || null, bridgeTaskId: taskId, recovered: !!t.recovered };
       }
       if (t.status === 'failed') {
         // Keep the version tag in the message (it lands in the failed
@@ -533,7 +546,43 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
         e.bridgeTaskId = taskId;
         throw e;
       }
-      // 'running' or 'unknown' — keep polling.
+      // 'running' or 'unknown' — keep polling until the cap runs out.
+      if (Date.now() >= deadlineMs) {
+        const e = new Error('ask_gemini task ' + taskId + ' did not finish within ' + Math.round(capMs / 1000) + 's — poll get_answer with task_id ' + taskId + ' for the result');
+        e.bridgeTaskId = taskId;
+        throw e;
+      }
+      await sleep(pollMs);
+    }
+  }
+
+  // Read the latest COMPLETE answer already in the Gemini tab, without
+  // asking again (v0.4.13, recover_last_answer). Returns the recovered
+  // answer (with recovered:true) or null when the tab has nothing to
+  // return — the prompt never left the box, the answer is still
+  // streaming, or the bridge/extension did not answer. Never throws:
+  // recovery is best-effort, and a miss just means the caller writes
+  // the failed file as before.
+  async function recoverLastAnswer(prompt) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    try {
+      const res = await fetchImpl(bridgeUrl + '/call', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool: 'recover_last_answer', params: { prompt: prompt || '' }, clientId: RUNNER_CLIENT_ID }),
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      const out = await res.json();
+      if (!out.ok) return null;
+      const r = out.result || {};
+      if (!r.answer) return null;
+      return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: true };
+    } catch (e) {
+      return null;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -545,7 +594,17 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     // failure).
     const overallDeadline = Date.now() + overallCapMs;
     const ctrl = new AbortController();
-    const abortMs = Math.min((timeoutS + 90) * 1000, 300000);
+    // v0.4.13 (teacher-testpc-002/003, 2026-11-22): the abort used to
+    // fire at min((timeoutS + 90)s, 300s) — for a 300s task that is 5
+    // minutes, exactly when the bridge's own timer returns
+    // pending+task_id. The fetch aborted first, the error was the bare
+    // DOM "This operation was aborted" with NO task_id, and the answer
+    // sitting in the tab was thrown away. The fetch must now stay on
+    // the line until the overall 15-minute cap: the bridge answers
+    // pending+task_id at ~300s and pollTask carries on from there, so
+    // the abort only ever fires when the bridge itself is hung — and
+    // then processOneTask recovers from the tab instead of failing.
+    const abortMs = overallCapMs;
     const timer = setTimeout(() => ctrl.abort(), abortMs);
     let out;
     try {
@@ -575,11 +634,11 @@ export function createBridgeCaller({ bridgeUrl = C.BRIDGE_URL, fetchImpl = fetch
     }
     const r = out.result || {};
     if (r.status === 'pending' && r.task_id) return pollTask(r.task_id, overallDeadline, overallCapMs);
-    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null };
+    if (r.answer) return { answer: r.answer, model: r.model || 'gemini-web', elapsedMs: r.elapsed_ms || null, adapterVersion: r.adapter_version || null, thinkingWarning: r.thinkingWarning || null, appliedThinking: r.appliedThinking || null, bridgeTaskId: r.task_id || null, recovered: !!r.recovered };
     throw new Error(r.error || 'ask_gemini returned no answer');
   }
 
-  return { status, ask };
+  return { status, ask, recoverLastAnswer };
 }
 
 // ---------- one task cycle (injectable, testable) ----------
@@ -708,18 +767,37 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
       log('browser busy — leaving task ' + task.id + ' pending');
       return { status: 'busy', id: task.id };
     }
-    const errMsg = e.message || String(e);
-    const adapterVersion = e.adapterVersion || adapterVersionFromError(errMsg);
-    const bridgeTaskId = e.bridgeTaskId || null;
-    logVersionMismatch(log, bridgeVersion, adapterVersion);
-    // v0.3.4: the failed file carries the bridge task_id whenever one
-    // exists, so the answer can still be retrieved later via get_answer
-    // even when this run gave up (e.g. the 15-minute poll cap ran out).
-    const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, failed_at: new Date().toISOString() };
-    await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
-    await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
-    await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, askedThinking, adapterVersion, bridgeVersion, bridgeTaskId }), log);
-    return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId };
+    // v0.4.13 (teacher-testpc-002/003): the ask failed, but the answer
+    // may already be in the Gemini tab — the fetch aborted with no
+    // task_id, or the send check misjudged a slow page. Read the tab
+    // once before writing a failed file; a recovered answer is written
+    // as done (marked recovered) instead. A miss just falls through to
+    // the failed file as before. Fake bridges in old tests have no
+    // recoverLastAnswer — the typeof guard keeps them working.
+    if (typeof bridge.recoverLastAnswer === 'function') {
+      let recovered = null;
+      try {
+        recovered = await bridge.recoverLastAnswer(task.prompt);
+      } catch (recErr) { /* recovery is best-effort; fall through to failed */ }
+      if (recovered && recovered.answer) {
+        log('ask 失败（' + (e.message || String(e)).slice(0, 120) + '），但从 Gemini 标签页找回了答案 — 按完成处理');
+        answer = recovered;
+      }
+    }
+    if (!answer) {
+      const errMsg = e.message || String(e);
+      const adapterVersion = e.adapterVersion || adapterVersionFromError(errMsg);
+      const bridgeTaskId = e.bridgeTaskId || null;
+      logVersionMismatch(log, bridgeVersion, adapterVersion);
+      // v0.3.4: the failed file carries the bridge task_id whenever one
+      // exists, so the answer can still be retrieved later via get_answer
+      // even when this run gave up (e.g. the 15-minute poll cap ran out).
+      const failedDoc = { id: task.id, error: errMsg, adapter_version: adapterVersion, bridge_version: bridgeVersion, bridge_task_id: bridgeTaskId, asked_thinking: askedThinking, failed_at: new Date().toISOString() };
+      await github.putFile(paths.failed, JSON.stringify(failedDoc, null, 2), 'muse-runner: task ' + task.id + ' failed');
+      await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove failed task ' + task.id);
+      await appendLog(github, buildLogEntry({ task, status: 'failed', error: errMsg, askedModel, askedThinking, adapterVersion, bridgeVersion, bridgeTaskId }), log);
+      return { status: 'failed', id: task.id, error: errMsg, adapterVersion, bridgeVersion, bridgeTaskId };
+    }
   }
 
   const adapterVersion = answer.adapterVersion || null;
@@ -735,6 +813,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
     applied_thinking: answer.appliedThinking || null,
     answered_model: answer.model || null,
     thinking_warning: answer.thinkingWarning || null,
+    recovered: !!answer.recovered,
     adapter_version: adapterVersion,
     bridge_version: bridgeVersion,
     bridge_task_id: bridgeTaskId,
@@ -743,7 +822,7 @@ export async function processOneTask({ github, bridge, log = () => {}, chromeOpe
   await github.putFile(paths.done, JSON.stringify(doneDoc, null, 2), 'muse-runner: task ' + task.id + ' answered');
   await github.deleteFile(first.entry.path, first.sha, 'muse-runner: remove done task ' + task.id);
   await appendLog(github, buildLogEntry({ task, status: 'done', elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, appliedThinking: answer.appliedThinking || null, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId }), log);
-  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId };
+  return { status: 'done', id: task.id, elapsedMs: answer.elapsedMs || null, askedModel, askedThinking, answeredModel: answer.model || null, adapterVersion, bridgeVersion, bridgeTaskId, recovered: !!answer.recovered };
 }
 
 // ---------- run loop ----------
