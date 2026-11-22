@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.6';
+    this.version = opts.version || '0.4.7';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -48,7 +48,7 @@
   Router.prototype.onAskResult = function (taskId, result) {
     var self = this;
     if (result && result.ok) {
-      // The thinking-level fields ride along (v0.4.6): the adapter
+      // The thinking-level fields ride along (v0.4.7): the adapter
       // reports what it actually used (appliedThinking) and any warning
       // (thinkingWarning); dropping them here made the runner's done
       // file report applied_thinking: null with no warning even though
