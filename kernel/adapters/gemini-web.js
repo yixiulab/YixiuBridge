@@ -241,7 +241,7 @@
   // the failure looks identical to a UI change (this bit us on 2026-11-21:
   // task -003 failed with the 0.2.0 error text while the panel showed
   // 0.3.0). Bump this together with the release version, everywhere.
-  var ADAPTER_VERSION = '0.4.4';
+  var ADAPTER_VERSION = '0.4.5';
 
   function sleep(ms) {
     return new Promise(function (resolve) { setTimeout(resolve, ms); });
@@ -1069,7 +1069,7 @@
     // treats those as a warning and asks anyway instead of failing the
     // whole task (v0.4.2: the real page left the button on "Neon" after
     // choosing 高, which failed every ask until this was non-fatal).
-    // Verification (v0.4.4) reads the submenu's checked item via
+    // Verification (v0.4.5) reads the submenu's checked item via
     // readSelectedThinkingLevel — never the picker button text, which
     // misreported 高 in verify11 while the submenu showed 低.
     async function selectThinkingLevel(level) {
@@ -1212,7 +1212,7 @@
         // Thinking level: an invalid level is a caller error and fails
         // fast; a failure to APPLY it only warns (v0.4.2) — the answer
         // is the deliverable, the level is best-effort. The result
-        // carries the ACTUALLY applied level (v0.4.4: read from the
+        // carries the ACTUALLY applied level (v0.4.5: read from the
         // submenu checkmark, never the button text) so the done file
         // reports what was really used, not just what was requested.
         var thinkingWarning = null;
