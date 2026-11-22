@@ -37,7 +37,7 @@ test('shouldAutoReload never loops on a version it already reloaded for', () => 
 });
 
 test('constants carry the current version', () => {
-  assert.equal(C.EXTENSION_VERSION, '0.4.15');
+  assert.equal(C.EXTENSION_VERSION, '0.4.16');
 });
 
 // --- Chrome profile discovery (v0.3.1 fix) ---
