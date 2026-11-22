@@ -1,8 +1,8 @@
 {
   "id": "task-20261122-bridge-042-verify34",
-  "stage": "sending",
-  "detail": "model Neon, thinking 高",
-  "updated_at": "2026-11-22T21:33:12.387Z",
+  "stage": "done",
+  "detail": "answer received",
+  "updated_at": "2026-11-22T21:33:37.247Z",
   "stages": [
     {
       "stage": "claimed",
@@ -13,6 +13,11 @@
       "stage": "sending",
       "at": "2026-11-22T21:33:12.387Z",
       "detail": "model Neon, thinking 高"
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-22T21:33:37.247Z",
+      "detail": "answer received"
     }
   ]
 }
