@@ -306,7 +306,7 @@ Info "runner 日志：$env:USERPROFILE\.yixiubridge\muse-runner.log"
 # 看门狗（v0.4.16）：注册每 3 分钟检查 runner 心跳的计划任务，runner 卡住/挂了能自己重启，不用等主人双击 .bat。
 # best-effort：注册失败只记一条 Warn，绝不拖垮主流程；注册本身幂等（-Force 覆盖已有任务）。
 try {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $InstallDir 'scripts\watchdog.ps1') -Register
+    & powershell -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File (Join-Path $InstallDir 'scripts\watchdog.ps1') -Register
     Info 'runner 看门狗已注册（每 3 分钟检查一次）。'
 } catch {
     Warn "看门狗注册失败（best-effort，本次跳过）：$($_.Exception.Message)"
