@@ -29,7 +29,7 @@
 import { appendFile, chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import C from '../kernel/shared/constants.js';
 import {
@@ -342,6 +342,39 @@ export async function findChromeExe({ env = process.env, stat: statImpl = stat }
   return null;
 }
 
+// List the command lines of running chrome.exe processes (Windows only).
+// Used by the auto-opener so it never launches a second Chrome window
+// when one with the same profile is already running (2026-11-23: the
+// opener spawned a new window every 3 minutes while the extension was
+// disconnected, and the user had to watch windows pile up). Returns [] on
+// non-Windows hosts, and null when the list could not be obtained at all
+// (caller fails open and spawns as before).
+export async function listChromeCommandLines({ platform = process.platform, execFileImpl = execFile } = {}) {
+  if (platform !== 'win32') return [];
+  return new Promise((resolve) => {
+    execFileImpl('powershell.exe',
+      ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | ForEach-Object { $_.CommandLine }"],
+      { timeout: 15000, windowsHide: true },
+      (err, stdout) => {
+        if (err) return resolve(null);
+        resolve(String(stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean));
+      });
+  });
+}
+
+// Does this chrome.exe command line carry --profile-directory=<dir>?
+// Quotes stripped first (Chrome quotes the value when it has a space);
+// the char after the name must end the line or be whitespace, so
+// 'Profile 2' never matches a 'Profile 21' process.
+function hasProfileFlag(line, profileDir) {
+  const clean = String(line).replace(/"/g, '');
+  const needle = '--profile-directory=' + profileDir;
+  const i = clean.indexOf(needle);
+  if (i === -1) return false;
+  const after = clean[i + needle.length];
+  return after === undefined || after === ' ' || after === '\t';
+}
+
 // The auto-opener: stateful (throttle + per-task attempt count) so a stuck
 // machine never spams Chrome windows. All platform/filesystem/process
 // access is injectable so tests can run on Linux; on a real PC the
@@ -353,6 +386,7 @@ export function createChromeOpener({
   spawnImpl = spawn,
   findProfileFn = findExtensionProfile,
   findExeFn = findChromeExe,
+  listChromeFn = listChromeCommandLines,
   now = () => Date.now(),
 } = {}) {
   let lastAttemptAt = 0;
@@ -390,6 +424,25 @@ export function createChromeOpener({
       if (!exe) {
         log('没有插件连着，找到了身份 ' + profile.profileDir + ' 但没找到 chrome.exe — 任务继续等着，请手动打开平时用 Gemini 的那个 Chrome');
         return { opened: false, reason: 'no-chrome-exe' };
+      }
+      // v0.4.18: launching chrome.exe with the same profile while Chrome
+      // is already running just opens ANOTHER window in the same process —
+      // that was the "a new page pops up every few minutes" spam while
+      // the extension was disconnected. If a Chrome process with this
+      // profile is already up, don't launch anything; the extension
+      // connects (or not) regardless of how many windows exist.
+      let lines = null;
+      let listErr = null;
+      try {
+        lines = await listChromeFn();
+      } catch (e) {
+        listErr = e;
+      }
+      if (listErr || lines === null) {
+        log('查 Chrome 是否在跑失败（' + (listErr && listErr.message ? listErr.message : 'PowerShell 没返回') + '）— 按老办法新开一个窗口');
+      } else if (lines.some((l) => hasProfileFlag(l, profile.profileDir))) {
+        log('Chrome（' + profile.profileDir + '）已经在跑了，不再新开窗口 — 等插件连上就好，任务继续等着');
+        return { opened: false, reason: 'already-running', profileDir: profile.profileDir, confirmed: profile.confirmed };
       }
       try {
         const child = spawnImpl(exe, ['--profile-directory=' + profile.profileDir, GEMINI_URL], { detached: true, stdio: 'ignore' });
