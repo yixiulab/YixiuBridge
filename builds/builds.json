@@ -139,6 +139,13 @@
       "channel": "stable",
       "verified_by_muse": false,
       "changelog": "修 verify35 暴露的弹窗问题（用户 2026-11-23 01:36 原话：你要适当关一些页面，要不每次都新开，多麻烦）：(1) runner 自动开 Chrome 前先查该 profile 是否已在跑——PowerShell 读 chrome.exe 命令行，带 --profile-directory=Profile 21 的进程已存在就不新开窗口，只记一行“已经在跑了，等插件连上就好”；此前 0.4.16 取消每任务 3 次上限后，0 扩展连着时每 3 分钟就新开一个 Chrome 窗口，verify35 排队 15 分钟弹了好几个页面，任务本身还没被认领。(2) router 开新 Gemini 标签页兜底时，旧标签页没反应且用户没在看，就关掉它——标签页不再越攒越多；用户正在看的标签页不动。查不到进程列表时按老办法新开窗口（绝不因此卡住任务）。新增 2 个测试，258/258 全过；回退法证实两处新测试都能捉住 bug（去掉检查，2 个失败）。"
+    },
+    {
+      "version": "0.4.19",
+      "date": "2026-11-23",
+      "channel": "stable",
+      "verified_by_muse": false,
+      "changelog": "修桌面黑框闪烁 + 更新太勤（用户 2026-11-23 11:15 原话：脚本过段时间就在屏幕上闪一下，更新太频繁，往后延；runner 这些脚本放后台跑，不要展现在桌面上）：根因不是更新检查——30 分钟检查在 runner 进程里跑，不开窗口；闪的是看门狗的计划任务，每 3 分钟跑一次 powershell 且没藏窗口。(1) 看门狗计划任务改 -WindowStyle Hidden（watchdog.ps1 注册时），3 分钟检查照常跑、再也不弹黑框；(2) 注册调用本身也藏起来（runner 的 ensureWatchdogRegistered 加 -WindowStyle Hidden + windowsHide，.bat 里那行也加）；(3) 更新检查 30 分钟改 2 小时（新稳定版最多 2 小时自己装上，双击 .bat 照样立刻装）。runner/桥自重启本来就带 windowsHide/最小化，不用改。测试 258/258 全过（看门狗注册测试改断言隐藏参数，更新间隔测试改 2 小时）；watchdog.ps1 仍是纯 ASCII。"
     }
   ]
 }
