@@ -1226,26 +1226,27 @@ test('createBridgeCaller logs the poll start and a per-minute summary while poll
   assert.ok(logs.filter((l) => /still running \(poll #/.test(l)).length >= 2, 'a summary line every 4th poll (one per minute at the 15s production interval)');
 });
 
-test('ensureWatchdogRegistered spawns the registration detached on Windows only (v0.4.16)', async () => {
+test('ensureWatchdogRegistered spawns the registration hidden and detached on Windows only (v0.4.19)', async () => {
   const spawns = [];
   const fakeSpawn = (exe, args, opts) => { spawns.push({ exe, args, opts }); return { unref() {} }; };
   // Off Windows: nothing happens.
   assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'linux', spawnImpl: fakeSpawn }), false);
   assert.equal(spawns.length, 0);
-  // On Windows: one detached powershell call with -Register.
+  // On Windows: one detached powershell call with -Register, hidden (no console flash).
   assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'win32', spawnImpl: fakeSpawn }), true);
   assert.equal(spawns.length, 1);
   assert.equal(spawns[0].exe, 'powershell.exe');
-  assert.deepEqual(spawns[0].args.slice(0, 4), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File']);
-  assert.equal(spawns[0].args[4], join('C:\\YixiuBridge', 'scripts', 'watchdog.ps1'));
-  assert.equal(spawns[0].args[5], '-Register');
+  assert.deepEqual(spawns[0].args.slice(0, 6), ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File']);
+  assert.equal(spawns[0].args[6], join('C:\\YixiuBridge', 'scripts', 'watchdog.ps1'));
+  assert.equal(spawns[0].args[7], '-Register');
   assert.equal(spawns[0].opts.detached, true);
+  assert.equal(spawns[0].opts.windowsHide, true);
   // A throwing spawn is swallowed (best-effort) and logged, never throws.
   const logs = [];
   assert.equal(ensureWatchdogRegistered({ installDir: 'C:\\YixiuBridge', platform: 'win32', spawnImpl: () => { throw new Error('no powershell'); }, log: (m) => logs.push(m) }), false);
   assert.ok(logs.some((l) => /watchdog registration failed/.test(l)));
 });
 
-test('UPDATE_CHECK_INTERVAL_MS is 30 minutes (v0.4.16)', () => {
-  assert.equal(UPDATE_CHECK_INTERVAL_MS, 30 * 60 * 1000);
+test('UPDATE_CHECK_INTERVAL_MS is 2 hours (v0.4.19)', () => {
+  assert.equal(UPDATE_CHECK_INTERVAL_MS, 2 * 60 * 60 * 1000);
 });
