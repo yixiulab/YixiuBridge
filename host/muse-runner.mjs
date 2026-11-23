@@ -1090,7 +1090,7 @@ export async function acquireLock(dataDir, log = logLine) {
 // to await loadConfig, and it invented timer/lock variable names that
 // do not exist in runRunner.)
 
-export const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes (was 2 min — a test value from 2026-11-22 that checked 720x/day even when already latest; 30 min lands a new stable within half an hour without the churn. Set by the user 2026-11-22 20:55, conditional on 0.4.15 testing clean on the real machine — it did, via teacher-005.)
+export const UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 60 * 1000; // 2 hours (was 30 min — the user asked 2026-11-23 to delay it further: the runner's black console kept flashing on the desktop and the update felt too frequent. New stable versions now land within 2 hours; double-clicking .bat still installs immediately. The flashing itself was the watchdog's 3-minute scheduled task running visible, not this check — see watchdog.ps1 v0.4.19.)
 export const RUNNER_SELF_RESTART_FILES = new Set([
   'host/muse-runner.mjs',
   'kernel/shared/constants.js',
@@ -1306,7 +1306,7 @@ export function ensureWatchdogRegistered({ installDir, platform = process.platfo
   if (platform !== 'win32') return false;
   try {
     const script = join(installDir, 'scripts', 'watchdog.ps1');
-    const child = spawnImpl('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Register'], { detached: true, stdio: 'ignore' });
+    const child = spawnImpl('powershell.exe', ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', script, '-Register'], { detached: true, stdio: 'ignore', windowsHide: true });
     if (child && typeof child.unref === 'function') child.unref();
     return true;
   } catch (e) {
@@ -1373,8 +1373,8 @@ export async function runRunner({ dataDir = DEFAULT_DATA_DIR, intervalS, fetchIm
       }
       // bridge-down / no-extension / busy: already logged inside processOneTask.
       // Idle online update (v0.4.0): only when this poll found no pending
-      // task at all, and at most once per UPDATE_CHECK_INTERVAL_MS (30 min
-      // since v0.4.16). The loop is strictly sequential, so an update can
+      // task at all, and at most once per UPDATE_CHECK_INTERVAL_MS (2 hours
+      // since v0.4.19). The loop is strictly sequential, so an update can
       // never overlap a task ask.
       if (res.status === 'empty' && Date.now() - lastUpdateCheckAt >= UPDATE_CHECK_INTERVAL_MS) {
         try {
