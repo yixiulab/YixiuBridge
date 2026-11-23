@@ -303,3 +303,20 @@ GitHub 限额一小时 5000 次，30 次/小时连零头都不到）。条件：
 测试：runner 新增 2 个（已在跑时一次都不开、节流后再查仍不开；不同身份仍要开；`Profile 2` 不误 match `Profile 21`；查不到时照常开；`listChromeCommandLines` 在非 Windows 上返回 `[]`），router 改 1 个（新标签页接手后旧标签页被关掉）。全套 **258/258**。回退法证实两处新测试都能捉住 bug：去掉已在跑检查、去掉关旧标签页，2 个失败；恢复后通过。
 
 未在真机上验（verified_by_muse 保持 false）：PowerShell 的进程列表形状（Win32_Process 的 CommandLine 在真机上是否带 `--profile-directory="Profile 21"`，以真机 runner 日志为准——新日志行“已经在跑了”会直接写进日志）；0.4.17 本身也还没在真机上验过，verify35 因弹窗问题已被撤回（pending 文件已删），待 0.4.18 装上后重发短问 OK 探针 + 长回答探针。
+
+## v0.4.19 — 桌面不再弹黑框 + 更新改 2 小时一查（2026-11-23，用户亲口要求）
+
+用户原话（2026-11-23 11:15）：“那个脚本的话它总是在屏幕上过段时间就会闪，而且这个更新太频繁了，把这个更新的话往后再延一下，再就是那些 runner 啊那些脚本那个放到后再运行嘛，不要在展现在我的那个桌面上了。”
+
+根因（先查代码再动手，不猜）：闪的不是更新检查。更新检查在 runner 进程内部跑（`runIdleOnlineUpdate`，`UPDATE_CHECK_INTERVAL_MS` 节拍），从不开新窗口，不可能闪。闪的是**看门狗的计划任务**：`scripts/watchdog.ps1` 注册的 `YixiuBridgeWatchdog` 任务每 3 分钟跑一次，动作是 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File watchdog.ps1`——没加 `-WindowStyle Hidden`，所以每 3 分钟弹一个黑框、跑完就关。另有两处同类闪烁：runner 启动时 `ensureWatchdogRegistered` 调 `powershell.exe ... -Register`（没 `windowsHide`），以及 `.bat` 里的同一行注册调用。
+
+改动（3 处，全是隐藏、不改行为）：
+- `scripts/watchdog.ps1` 注册动作加 `-WindowStyle Hidden`；3 分钟检查本身不动（心跳 3 分钟过期才判卡死，节拍不能延）。
+- `host/muse-runner.mjs` `ensureWatchdogRegistered`：参数加 `'-WindowStyle', 'Hidden'`，spawn 选项加 `windowsHide: true`。
+- `scripts/update-and-start.ps1` 第 309 行注册调用加 `-WindowStyle Hidden`。
+- `UPDATE_CHECK_INTERVAL_MS`：30 分钟 → **2 小时**（用户要求往后延；新稳定版最多 2 小时自己装上，双击 .bat 照样立刻装）。`watchdog.ps1` 仍是纯 ASCII。
+- runner/桥的自重启本来就带 `windowsHide: true` / `-WindowStyle Minimized`，不用改。
+
+安装路径：注册是幂等的（`-Force` 覆盖），0.4.19 装上后 runner 重启即按新方式重新注册看门狗，旧的可见任务被覆盖掉；装上后 3 分钟内就能验证黑框不再闪。0.4.19 由旧的 30 分钟节拍在半小时内自动装上，或双击 .bat 立刻装上。
+
+测试：`tests/muse-runner.test.mjs` 看门狗测试改断言隐藏参数（args 含 `-WindowStyle Hidden`、opts.windowsHide true），更新间隔测试改 2 小时；全套 258/258 通过。回退法：把两处隐藏参数去掉，看门狗测试断言失败（args/opts 不匹配），恢复后全过。
