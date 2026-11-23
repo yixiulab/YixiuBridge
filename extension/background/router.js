@@ -15,7 +15,7 @@
     this.bridge = opts.bridge; // BridgeClient (for task updates)
     this.debugger = opts.debugger; // DebuggerManager
     this.profile = opts.profile; // { id, label }
-    this.version = opts.version || '0.4.17';
+    this.version = opts.version || '0.4.18';
     this.controller = null; // clientId of the current controller (from bridge)
     this.tasks = new Map(); // taskId -> { status, answer?, error?, startedAt, finishedAt }
     this._waiters = new Map(); // taskId -> [resolve...]
@@ -56,7 +56,7 @@
       // Same rule for `recovered` (v0.4.13): an answer the adapter
       // rescued from the tab after the send checks misjudged must be
       // marked as recovered all the way to the runner's done file.
-      // Same rule for `completedVia` / `streamingFlagStuck` (v0.4.17):
+      // Same rule for `completedVia` / `streamingFlagStuck` (v0.4.18):
       // how the adapter decided the answer was done ('stable', or
       // 'stable-while-streaming' when the stop button stuck). The
       // runner logs it; the done file does not gain a field.
@@ -208,6 +208,8 @@
   // never answers or answers with an old version. Either way the tab is
   // reloaded ONCE so the current adapter loads, then pinged again. Never
   // more than once — a second failure is a real error, not a stale tab.
+  // If a fresh tab is opened and answers, the dead one is closed (unless
+  // the user is looking at it) so Gemini tabs never pile up (v0.4.18).
   Router.prototype._ensureGeminiTab = async function () {
     var tab = await this._findGeminiTab();
     if (!tab) {
@@ -237,7 +239,15 @@
         if (cs === 'stale') {
           throw new Error('Gemini content script is still an old version after reloading the tab — reload the extension in chrome://extensions (it should show ' + this.version + ') and try again');
         }
-        if (cs === 'ok') tab = fresh;
+        if (cs === 'ok') {
+        // v0.4.18: don't pile up dead Gemini tabs — close the one that
+        // never answered, unless the user is looking at it.
+        var deadTab = tab;
+        tab = fresh;
+        if (deadTab && !deadTab.active) {
+          try { await chrome.tabs.remove(deadTab.id); } catch (e) { /* already closed */ }
+        }
+      }
       }
     }
     if (cs !== 'ok') {
