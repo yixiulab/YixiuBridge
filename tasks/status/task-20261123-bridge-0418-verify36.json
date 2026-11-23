@@ -1,13 +1,18 @@
 {
   "id": "task-20261123-bridge-0418-verify36",
-  "stage": "claimed",
-  "detail": "bridge v0.4.18, 1 extension connected",
-  "updated_at": "2026-11-23T00:48:51.937Z",
+  "stage": "sending",
+  "detail": "model Neon, thinking 高",
+  "updated_at": "2026-11-23T00:48:52.835Z",
   "stages": [
     {
       "stage": "claimed",
       "at": "2026-11-23T00:48:51.937Z",
       "detail": "bridge v0.4.18, 1 extension connected"
+    },
+    {
+      "stage": "sending",
+      "at": "2026-11-23T00:48:52.835Z",
+      "detail": "model Neon, thinking 高"
     }
   ]
 }
