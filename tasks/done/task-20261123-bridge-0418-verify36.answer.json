@@ -1,0 +1,34 @@
+{
+  "id": "task-20261123-bridge-0418-verify36",
+  "answer": "OK",
+  "model": "gemini-web",
+  "elapsed_ms": 16981,
+  "asked_model": "Neon",
+  "asked_thinking": "高",
+  "applied_thinking": "低",
+  "answered_model": "Neon",
+  "thinking_warning": "gemini thinking level did not stick after 3 attempts — selected level is \"低\" after choosing \"高\"",
+  "recovered": false,
+  "recovered_unmatched": false,
+  "adapter_version": "0.4.18",
+  "bridge_version": "0.4.18",
+  "bridge_task_id": "task_mwsjscy064orq6",
+  "stages": [
+    {
+      "stage": "claimed",
+      "at": "2026-11-23T00:48:51.937Z",
+      "detail": "bridge v0.4.18, 1 extension connected"
+    },
+    {
+      "stage": "sending",
+      "at": "2026-11-23T00:48:52.835Z",
+      "detail": "model Neon, thinking 高"
+    },
+    {
+      "stage": "done",
+      "at": "2026-11-23T00:49:10.628Z",
+      "detail": "answer received"
+    }
+  ],
+  "answered_at": "2026-11-23T00:49:11.480Z"
+}
