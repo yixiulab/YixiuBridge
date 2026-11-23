@@ -26,6 +26,7 @@ import {
   acquireLock,
   findExtensionProfile,
   createChromeOpener,
+  listChromeCommandLines,
   ensureWatchdogRegistered,
   UPDATE_CHECK_INTERVAL_MS,
   EXTENSION_ID,
@@ -989,6 +990,67 @@ test('createChromeOpener opens Chrome with the right profile, throttles, and cap
   const other = await opener.ensureConnected({ taskId: 't2', log });
   assert.equal(other.opened, true);
   assert.equal(spawns.length, 5);
+});
+
+test('createChromeOpener does not open a new Chrome window when one with the same profile is already running (v0.4.18)', async () => {
+  const spawns = [];
+  const fakeSpawn = (exe, args, opts) => { spawns.push({ exe, args }); return { unref() {} }; };
+  let nowMs = 1000000;
+  const base = {
+    dataDir: await mkdtemp(join(tmpdir(), 'yixiubridge-opener-')),
+    platform: 'win32',
+    env: { LOCALAPPDATA: 'C:\\Users\\at\\AppData\\Local' },
+    spawnImpl: fakeSpawn,
+    findProfileFn: async () => ({ profileDir: 'Profile 21', confirmed: true }),
+    findExeFn: async () => 'C:\\chrome.exe',
+    now: () => nowMs,
+  };
+  const logs = [];
+  const log = (m) => logs.push(m);
+  // Chrome with Profile 21 already running: no new window, ever — even
+  // after the 3-minute throttle, the opener just waits for the extension.
+  const running = createChromeOpener({
+    ...base,
+    listChromeFn: async () => ['"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --profile-directory="Profile 21" --flag'],
+  });
+  const r1 = await running.ensureConnected({ taskId: 't1', log });
+  assert.equal(r1.opened, false);
+  assert.equal(r1.reason, 'already-running');
+  assert.equal(spawns.length, 0);
+  assert.ok(logs.some((l) => /已经在跑了，不再新开窗口/.test(l)));
+  nowMs += 181000;
+  assert.equal((await running.ensureConnected({ taskId: 't1', log })).reason, 'already-running');
+  assert.equal(spawns.length, 0, 'still no window after the throttle interval');
+  // A Chrome running with a DIFFERENT profile does not count: the
+  // extension lives in Profile 21, so a window must still be opened.
+  const otherProfile = createChromeOpener({
+    ...base,
+    listChromeFn: async () => ['"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --profile-directory="Profile 5"'],
+  });
+  assert.equal((await otherProfile.ensureConnected({ taskId: 't1', log })).opened, true);
+  assert.equal(spawns.length, 1);
+  // 'Profile 2' must not match a 'Profile 21' process (prefix trap).
+  const prefixTrap = createChromeOpener({
+    ...base,
+    findProfileFn: async () => ({ profileDir: 'Profile 2', confirmed: true }),
+    listChromeFn: async () => ['"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --profile-directory="Profile 21"'],
+  });
+  nowMs += 181000;
+  assert.equal((await prefixTrap.ensureConnected({ taskId: 't1', log })).opened, true);
+  assert.equal(spawns.length, 2);
+  // When the process list cannot be obtained at all, fail open: spawn
+  // as before (a stale check must never stall the task).
+  const unknown = createChromeOpener({
+    ...base,
+    listChromeFn: async () => null,
+  });
+  nowMs += 181000;
+  assert.equal((await unknown.ensureConnected({ taskId: 't1', log })).opened, true);
+  assert.equal(spawns.length, 3);
+});
+
+test('listChromeCommandLines returns [] off Windows', async () => {
+  assert.deepEqual(await listChromeCommandLines(), []);
 });
 
 test('createChromeOpener does nothing off Windows, and reports a missing profile or chrome.exe instead of spawning', async () => {
