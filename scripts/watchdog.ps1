@@ -18,7 +18,9 @@
 #     Register-ScheduledTask -Force overwrites the existing task, so
 #     calling it on every runner start and every .bat run is safe.
 #     Always exits 0 - registration is best-effort and must never break
-#     the caller.
+#     the caller. (v0.4.19: the task action runs with -WindowStyle
+#     Hidden, so the 3-minute check never flashes a console window on
+#     the desktop - before that it did, every 3 minutes.)
 #
 # Why a watchdog at all: teacher-005 (2026-11-22) sat unclaimed for
 # ~7 minutes because the runner had stopped processing after an update
@@ -48,7 +50,7 @@ function Write-WatchdogLog([string]$Message) {
 if ($Register) {
     try {
         $scriptPath = Join-Path $PSScriptRoot 'watchdog.ps1'
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -File "' + $scriptPath + '"')
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $scriptPath + '"')
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3) -RepetitionDuration (New-TimeSpan -Days 365)
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
