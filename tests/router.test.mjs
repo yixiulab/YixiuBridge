@@ -94,6 +94,7 @@ function makeGeminiRouter({ sendMessageImpl, pingTimeoutMs, bridge }) {
       get: async () => tab,
       create: async () => tab,
       reload: async (tabId) => { reloads.push(tabId); },
+      remove: async () => {},
       sendMessage: (tabId, msg) => sendMessageImpl(tabId, msg),
     },
   };
@@ -298,12 +299,14 @@ test('content script silent after a reload opens a fresh tab and proceeds (v0.4.
   const freshTab = { id: 8, title: 'Gemini', url: 'https://gemini.google.com/app', active: false, status: 'complete' };
   const reloads = [];
   const creates = [];
+  const removed = [];
   const fakeChrome = {
     tabs: {
       query: async () => [oldTab],
       get: async (tabId) => (tabId === 8 ? freshTab : oldTab),
       create: async (opts) => { creates.push(opts); return freshTab; },
       reload: async (tabId) => { reloads.push(tabId); },
+      remove: async (tabId) => { removed.push(tabId); },
       sendMessage: async (tabId, msg) => {
         if (msg.tool === 'ping') {
           // The old tab never answers, even after its reload (discarded /
@@ -331,6 +334,7 @@ test('content script silent after a reload opens a fresh tab and proceeds (v0.4.
   assert.deepEqual(reloads, [7], 'old tab is reloaded once first');
   assert.equal(creates.length, 1, 'a fresh tab is opened when the reload does not restore the script');
   assert.equal(creates[0].url, 'https://gemini.google.com/app');
+  assert.deepEqual(removed, [7], 'the dead old tab is closed once the fresh one answers (v0.4.18) — tabs must not pile up');
 });
 
 test('ask_gemini success result carries adapter_version through', async () => {
