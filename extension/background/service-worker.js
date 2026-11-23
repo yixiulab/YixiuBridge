@@ -14,7 +14,7 @@ importScripts(
 (function () {
   'use strict';
 
-  var VERSION = '0.4.17';
+  var VERSION = '0.4.18';
   var PROFILE_KEY = 'yixiubridge.profile';
   var UPDATE_CHECK_KEY = 'yixiubridge.lastAutoReloadVersion';
 
@@ -199,7 +199,7 @@ importScripts(
   // resumes promptly after Chrome suspends it. The same tick also checks
   // for a newer version on disk (auto-update, see checkForUpdate).
   //
-  // v0.4.17 (teacher-005, 2026-11-22): two reconnect fixes ride on this
+  // v0.4.18 (teacher-005, 2026-11-22): two reconnect fixes ride on this
   // tick. (1) Stale SSE: the bridge sends an SSE heartbeat every 15s,
   // so no traffic for 45s (3 missed heartbeats) means the stream is
   // dead even if `bridge.connected` still says true — a worker suspended
