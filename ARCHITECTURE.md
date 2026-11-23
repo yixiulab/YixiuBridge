@@ -291,3 +291,15 @@ GitHub 限额一小时 5000 次，30 次/小时连零头都不到）。条件：
 测试：mock 新增 `menuCloseDelayMs`（菜单关闭动画：点击后延迟移除，关闭进行中点 picker 被吞掉——真实页面的形状）与 `responseDelayMs`（提问先入对话、思考圆点先出，回答延迟才开始——真实页面的思考阶段）；`startStreaming` 拆成建提问轮 + 开始流式，并加 `streamingStarted` 守卫防重复触发（流式结束复位）。新增 9 个测试（验证 2 个：`waitForMenuClosed` 单元、慢关菜单下第一次就读出 高；灵活等待 4 个：文本在变时延长取回、硬上限报错点名、思考阶段无文本时延长取回、无活动仍按时失败；发送检测 1 个：无发送按钮 + Enter + 延迟回答时经提问轮确认发送；另 3 个是旧超时测试按新行为改写：流式标志残留时延长后取回、文本持续变化时延长取回、永不结束的流式在硬上限结束并带 partial）。另改 1 个旧测试（recover.test.mjs：ask 本身不再超时，改用 400 毫秒硬上限让 ask 失败、恢复路径照常验证）。全套 **256/256**。验证测试用回退法证实能捉住 bug：把 `selectThinkingLevel` 的等菜单关改回 sleep(300)、把 `readSelectedThinkingLevel` 的确保关闭去掉，D2 测试失败（高 被点了 2 次才粘住）；恢复后通过。新增断言 `page.levelClickCounts['高'] === 1`——重试循环会掩盖第一次读旧的毛病（后一次在关闭后读新鲜的），点 1 次才是第一次就读对的证明；真实页面上旧读法 3 次重试全读 低（verify14/15/16），比 mock 更粘。
 
 未在真机上验（verified_by_muse 保持 false）：三处修复都只在 mock 上证实形状；真实 Gemini 的菜单关闭动画时长、思考圆点形态、Enter 发送后提问轮出现的时间都以真机探针为准。下一版探针建议：短问 OK（看发送检测与验证读数）+ 长回答（看灵活等待与完成检测）。
+
+## v0.4.18 — 不再乱开新窗口/新标签页（2026-11-23，用户亲口要求）
+
+用户 2026-11-23 01:36 原话：“你要适当关一些页面，要不每次都新开，多麻烦。”背景是 verify35（0.4.17 首个真机探针，2026-11-23 01:21 发出）：任务在 tasks/pending 里躺了 15 分钟没人认领、连 status 文件都没写出来，同时 Chrome 窗口一个接一个弹出来。根因在 runner 的自动开 Chrome：0.4.16 取消了每任务 3 次上限后，桥报 0 个扩展连着时，每 3 分钟节流一过就 `spawn chrome.exe --profile-directory=Profile 21` 一次——而 Chrome 已在跑时，这样启动只是在同一进程里再开一个新窗口，插件连不连得上与窗口数量无关。verify35 的任务本身还没被认领（runner 活着、在轮询，桥 up、0 扩展），弹窗纯属白开。
+
+1. **runner 开 Chrome 前先查该 profile 是否已在跑**：新增 `listChromeCommandLines()`（Windows：PowerShell `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'"` 读命令行，`windowsHide: true` 不闪窗口；非 Windows 返回 `[]`；PowerShell 失败返回 `null`）。`ensureConnected` 在找到 profile 与 chrome.exe 之后、spawn 之前查一次：命令行里有 `--profile-directory=<该身份>`（去引号后匹配，名字后必须是行尾或空白——`Profile 2` 不能误 match `Profile 21` 的进程）就不启动，记一行“Chrome（Profile 21）已经在跑了，不再新开窗口 — 等插件连上就好”，返回 `{ opened: false, reason: 'already-running' }`。查不到进程列表时按老办法新开窗口（绝不因此卡住任务）。`listChromeFn` 可注入，测试用假命令行。
+
+2. **router 开新 Gemini 标签页兜底时关掉没反应的旧标签**：`_ensureGeminiTab` 里新标签页 ping 通后，旧标签页如果用户没在看（`!tab.active`），`chrome.tabs.remove` 关掉它——标签页不再越攒越多；用户正在看的标签页不动。重载一次仍不通才走这条路，逻辑不变。
+
+测试：runner 新增 2 个（已在跑时一次都不开、节流后再查仍不开；不同身份仍要开；`Profile 2` 不误 match `Profile 21`；查不到时照常开；`listChromeCommandLines` 在非 Windows 上返回 `[]`），router 改 1 个（新标签页接手后旧标签页被关掉）。全套 **258/258**。回退法证实两处新测试都能捉住 bug：去掉已在跑检查、去掉关旧标签页，2 个失败；恢复后通过。
+
+未在真机上验（verified_by_muse 保持 false）：PowerShell 的进程列表形状（Win32_Process 的 CommandLine 在真机上是否带 `--profile-directory="Profile 21"`，以真机 runner 日志为准——新日志行“已经在跑了”会直接写进日志）；0.4.17 本身也还没在真机上验过，verify35 因弹窗问题已被撤回（pending 文件已删），待 0.4.18 装上后重发短问 OK 探针 + 长回答探针。
