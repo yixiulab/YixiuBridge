@@ -43,7 +43,7 @@
   return {
     // Identity
     EXTENSION_NAME: 'YixiuBridge',
-    EXTENSION_VERSION: '0.4.19',
+    EXTENSION_VERSION: '0.4.20',
     PROTOCOL_VERSION: '1.0.0',
 
     // Local bridge (binds 127.0.0.1 ONLY — never 0.0.0.0, never a public port)
