@@ -18,9 +18,13 @@
 #     Register-ScheduledTask -Force overwrites the existing task, so
 #     calling it on every runner start and every .bat run is safe.
 #     Always exits 0 - registration is best-effort and must never break
-#     the caller. (v0.4.19: the task action runs with -WindowStyle
-#     Hidden, so the 3-minute check never flashes a console window on
-#     the desktop - before that it did, every 3 minutes.)
+#     the caller. (v0.4.20: the task action runs wscript.exe with
+#     scripts/watchdog-launcher.vbs, which starts PowerShell with no
+#     console window at all - powershell.exe -WindowStyle Hidden
+#     (v0.4.19) still let conhost / Windows Terminal flash a window
+#     briefly on some Windows 11 machines, because the console host
+#     creates the window before PowerShell hides it. With wscript
+#     there is no console host, so nothing can flash.)
 #
 # Why a watchdog at all: teacher-005 (2026-11-22) sat unclaimed for
 # ~7 minutes because the runner had stopped processing after an update
@@ -49,8 +53,8 @@ function Write-WatchdogLog([string]$Message) {
 
 if ($Register) {
     try {
-        $scriptPath = Join-Path $PSScriptRoot 'watchdog.ps1'
-        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $scriptPath + '"')
+        $launcherPath = Join-Path $PSScriptRoot 'watchdog-launcher.vbs'
+        $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ('"' + $launcherPath + '"')
         $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3) -RepetitionDuration (New-TimeSpan -Days 365)
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
@@ -100,11 +104,14 @@ if ($runnerAlive) {
     Write-WatchdogLog ("runner pid " + $runnerPid + " hung (heartbeat stale) - stopped it")
 }
 
-# Start a fresh runner, minimized, detached (same shape as
-# update-and-start.ps1 step 6). If a hung runner is still around, the
-# new runner's stale-lock takeover + idempotency guard make it safe.
+# Start a fresh runner, hidden, detached (same shape as
+# update-and-start.ps1 step 6, but Hidden not Minimized: this restart
+# happens silently in the background, and a minimized console still
+# puts a taskbar button up - Hidden leaves no trace on the desktop).
+# If a hung runner is still around, the new runner's stale-lock
+# takeover + idempotency guard make it safe.
 try {
-    Start-Process -FilePath 'node' -ArgumentList @($RunnerScript) -WindowStyle Minimized -WorkingDirectory $InstallDir | Out-Null
+    Start-Process -FilePath 'node' -ArgumentList @($RunnerScript) -WindowStyle Hidden -WorkingDirectory $InstallDir | Out-Null
     Write-WatchdogLog 'runner restarted (heartbeat stale or missing)'
 } catch {
     Write-WatchdogLog ('runner restart failed: ' + $_.Exception.Message)
