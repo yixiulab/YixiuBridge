@@ -5,9 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, unlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, unlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   parseTask,
   parseThinking,
@@ -28,6 +29,7 @@ import {
   createChromeOpener,
   listChromeCommandLines,
   ensureWatchdogRegistered,
+  repackageExtension,
   UPDATE_CHECK_INTERVAL_MS,
   EXTENSION_ID,
 } from '../host/muse-runner.mjs';
@@ -1249,4 +1251,51 @@ test('ensureWatchdogRegistered spawns the registration hidden and detached on Wi
 
 test('UPDATE_CHECK_INTERVAL_MS is 2 hours (v0.4.19)', () => {
   assert.equal(UPDATE_CHECK_INTERVAL_MS, 2 * 60 * 60 * 1000);
+});
+
+// ---------- v0.4.20: no console window anywhere ----------
+// 0.4.19 hid the watchdog's scheduled task with powershell.exe
+// -WindowStyle Hidden, but the user still saw a black box flash: on
+// Windows 11 with Windows Terminal as the default console host the
+// console window is created before PowerShell hides it. The task
+// must therefore launch through wscript.exe, which never creates a
+// console at all. The repackager had the same hole (bare node spawn
+// = visible console for a few seconds on every update/rollback).
+
+test('watchdog scheduled task launches via wscript, no console window (v0.4.20)', async () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const ps = await readFile(join(root, 'scripts', 'watchdog.ps1'), 'utf8');
+  // The scheduled-task action is wscript + the launcher, not powershell.
+  assert.match(ps, /New-ScheduledTaskAction -Execute 'wscript\.exe'/);
+  assert.match(ps, /watchdog-launcher\.vbs/);
+  // Nothing in the watchdog may open a visible/minimized console:
+  // the background runner restart is Hidden, and no Minimized remains.
+  assert.doesNotMatch(ps, /-WindowStyle Minimized/);
+  assert.match(ps, /Start-Process -FilePath 'node'.*-WindowStyle Hidden/);
+  // The launcher itself: wscript Run with window style 0 (hidden),
+  // no waiting, and it must point at watchdog.ps1 next to it.
+  const vbs = await readFile(join(root, 'scripts', 'watchdog-launcher.vbs'), 'utf8');
+  assert.match(vbs, /powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/);
+  assert.match(vbs, /watchdog\.ps1/);
+  assert.match(vbs, /\.Run .*", 0, False/);
+});
+
+test('repackageExtension spawns node hidden and detached (v0.4.20)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'yb-repack-'));
+  try {
+    await mkdir(join(dir, 'scripts'), { recursive: true });
+    await writeFile(join(dir, 'scripts', 'package-extension.mjs'), '');
+    const spawns = [];
+    const fakeChild = { stderr: null, on(ev, cb) { if (ev === 'close') setTimeout(() => cb(0), 0); } };
+    const fakeSpawn = (exe, args, opts) => { spawns.push({ exe, args, opts }); return fakeChild; };
+    const res = await repackageExtension({ installDir: dir, spawnFn: fakeSpawn });
+    assert.equal(res.ok, true);
+    assert.equal(spawns.length, 1);
+    assert.equal(spawns[0].exe, process.execPath);
+    assert.equal(spawns[0].opts.windowsHide, true, 'no console window while packaging');
+    assert.equal(spawns[0].opts.detached, true);
+    assert.equal(spawns[0].opts.stdio, 'ignore');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
