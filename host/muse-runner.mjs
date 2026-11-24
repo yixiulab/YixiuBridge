@@ -1146,7 +1146,10 @@ export async function repackageExtension({ installDir, spawnFn = spawn } = {}) {
   } catch (e) {
     return { ok: true, skipped: true, reason: 'no package-extension.mjs in install dir' };
   }
-  const child = spawnFn(process.execPath, [script], { cwd: installDir });
+  // v0.4.20: hidden + detached + no stdio - node.exe is a console app
+  // on Windows, and spawning it bare pops a visible console window
+  // while the packager runs (a few seconds, on every update/rollback).
+  const child = spawnFn(process.execPath, [script], { cwd: installDir, detached: true, stdio: 'ignore', windowsHide: true });
   let stderr = '';
   if (child.stderr && child.stderr.on) child.stderr.on('data', (d) => { stderr += String(d); });
   const code = await new Promise((resolve, reject) => {
