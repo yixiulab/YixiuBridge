@@ -320,3 +320,19 @@ GitHub 限额一小时 5000 次，30 次/小时连零头都不到）。条件：
 安装路径：注册是幂等的（`-Force` 覆盖），0.4.19 装上后 runner 重启即按新方式重新注册看门狗，旧的可见任务被覆盖掉；装上后 3 分钟内就能验证黑框不再闪。0.4.19 由旧的 30 分钟节拍在半小时内自动装上，或双击 .bat 立刻装上。
 
 测试：`tests/muse-runner.test.mjs` 看门狗测试改断言隐藏参数（args 含 `-WindowStyle Hidden`、opts.windowsHide true），更新间隔测试改 2 小时；全套 258/258 通过。回退法：把两处隐藏参数去掉，看门狗测试断言失败（args/opts 不匹配），恢复后全过。
+
+## v0.4.20 — 黑框闪烁彻底修掉：看门狗改走 wscript（2026-11-24，用户亲口要求）
+
+用户原话（2026-11-24 20:16）：“我现在发现他这个脚本为什么总是那个弹框一闪一闪的，黑框一闪而过，一闪而过，我怀疑还是那个脚本在运行的时候还是有什么问题，把这个地方没有改掉，你现在我不要，我要求你不要让他再闪了。”
+
+根因（先查代码再动手，不猜）：0.4.19 的 `-WindowStyle Hidden` 治标不彻底。`powershell.exe -WindowStyle Hidden` 的意思是“窗口建出来后再藏起来”——在 Windows 11 + Windows Terminal 为默认终端的机器上，控制台宿主先把窗口建出来、PowerShell 随后才执行隐藏，于是每 3 分钟仍闪一下。彻底的办法是**全程不建控制台窗口**：计划任务改走 `wscript.exe` + 新 `scripts/watchdog-launcher.vbs`，wscript 本身是图形子系统宿主、从不建控制台，`.vbs` 再用 `Run(..., 0)` 起 PowerShell——窗口样式 0，从出生就是隐藏的，没东西可闪。
+
+同类漏网（同一轮审计一次查完）：
+- `repackageExtension` 是裸 `spawn(node, [package-extension.mjs], { cwd })`：node.exe 是控制台程序，每次更新/回滚打包时都弹几秒黑框。加 `detached + stdio: 'ignore' + windowsHide: true`（函数里本来就有 `child.stderr` 为空的守卫，改 stdio 不影响报错收集）。
+- 看门狗触发的 runner 重启是 `-WindowStyle Minimized`：最小化窗口仍占一个任务栏按钮，后台重启本就不需要。改 `-WindowStyle Hidden`。
+
+不动的：3 分钟检查节拍、心跳 3 分钟过期判卡死、2 小时更新检查、注册路径（runner 启动时 `ensureWatchdogRegistered` + `.bat` 里调 `watchdog.ps1 -Register`，`-Force` 幂等覆盖旧任务——0.4.20 装上后旧的可见/powershell 任务就被 wscript 任务覆盖掉）。`watchdog.ps1` 与 `.vbs` 仍是纯 ASCII。
+
+安装路径：0.4.20 由 runner 空闲更新（2 小时节拍，需桥就绪且插件连着）自动装上，或双击 `.bat` 立刻装上。装上后等 5 分钟——旧任务每 3 分钟闪一次，5 分钟没闪就是修好了。
+
+测试：`tests/muse-runner.test.mjs` 新增 2 个——(1) 读 `watchdog.ps1` 源码断言计划任务动作是 wscript + launcher、文件里再无 `-WindowStyle Minimized`、重启行为 Hidden；读 `.vbs` 断言 `Run(..., 0, False)` 起 PowerShell；(2) `repackageExtension` 假 spawn 断言 opts 含 windowsHide/detached/stdio ignore。全套 260/260 通过。回退法：把 wscript 动作改回 powershell、重启改回 Minimized、打包去掉隐藏参数，新测试 2 个失败（其余 60 个通过）；恢复后全过。
